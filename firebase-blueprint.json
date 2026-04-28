@@ -1,0 +1,114 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and balance information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "balance": { "type": "number" },
+        "totalCommissionsEarned": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "banned", "paused"] },
+        "referralCode": { "type": "string" },
+        "referredBy": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "user"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "balance", "role"]
+    },
+    "Investment": {
+      "title": "Investment",
+      "description": "User staking investment",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "amount": { "type": "number" },
+        "planId": { "type": "string" },
+        "planName": { "type": "string" },
+        "startDate": { "type": "string", "format": "date-time" },
+        "endDate": { "type": "string", "format": "date-time" },
+        "lastPayoutDate": { "type": "string", "format": "date-time" },
+        "status": { "type": "string", "enum": ["pending", "active", "completed", "rejected"] }
+      },
+      "required": ["userId", "amount", "planId", "startDate", "status"]
+    },
+    "Deposit": {
+      "title": "Deposit",
+      "description": "User deposit submission",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "amount": { "type": "number" },
+        "screenshotUrl": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "amount", "status", "createdAt"]
+    },
+    "Withdrawal": {
+      "title": "Withdrawal",
+      "description": "User withdrawal request",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "amount": { "type": "number" },
+        "walletAddress": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "amount", "walletAddress", "status", "createdAt"]
+    },
+    "Referral": {
+      "title": "Referral",
+      "description": "Referral relationship tracking",
+      "type": "object",
+      "properties": {
+        "referrerUid": { "type": "string" },
+        "referredUid": { "type": "string" },
+        "referredEmail": { "type": "string" },
+        "isActiveInvestor": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["referrerUid", "referredUid", "referredEmail", "createdAt"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "Admin posted updates and notifications",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "message", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/investments/{investmentId}": {
+      "schema": "Investment",
+      "description": "Staking investments"
+    },
+    "/deposits/{depositId}": {
+      "schema": "Deposit",
+      "description": "Deposit requests"
+    },
+    "/withdrawals/{withdrawalId}": {
+      "schema": "Withdrawal",
+      "description": "Withdrawal requests"
+    },
+    "/referrals/{referralId}": {
+      "schema": "Referral",
+      "description": "Referral records"
+    },
+    "/notifications/{notificationId}": {
+      "schema": "Notification",
+      "description": "System notifications"
+    }
+  }
+}

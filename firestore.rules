@@ -1,0 +1,149 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.email == "pixistaking@gmail.com" ||
+        request.auth.token.email == "admin@pixi.com" ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
+      );
+    }
+    function isValidEmail(email) {
+      return email is string && email.size() < 100 && email.matches(".+@.+\\..+");
+    }
+    function isRecent(t) {
+      return t is timestamp && t > request.time - duration.value(5, 'm') && t < request.time + duration.value(5, 'm');
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+    function isValidUser(data, userId) {
+      return data.uid is string && data.uid == userId &&
+             data.email is string &&
+             data.balance is number && data.balance >= 0 &&
+             data.referralCode is string && data.referralCode.size() > 0 &&
+             data.role in ['admin', 'user', 'deleted'] &&
+             (!('status' in data) || data.status in ['active', 'banned', 'paused']) &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidInvestment(data) {
+      return data.userId is string && data.userId.size() > 0 &&
+             data.amount is number && data.amount > 0 &&
+             data.planId is string && data.planId.size() > 0 &&
+             data.status in ['pending', 'active', 'completed', 'rejected'] &&
+             data.startDate is timestamp &&
+             data.endDate is timestamp &&
+             data.lastPayoutDate is timestamp;
+    }
+
+    function isValidDeposit(data) {
+      return data.userId is string && data.userId.size() > 0 &&
+             data.amount is number && data.amount > 0 &&
+             data.screenshotUrl is string && data.screenshotUrl.size() < 200000 &&
+             data.status in ['pending', 'approved', 'rejected'] &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidWithdrawal(data) {
+      return data.userId is string && data.userId.size() > 0 &&
+             data.amount is number && data.amount > 0 &&
+             data.walletAddress is string && data.walletAddress.size() > 0 &&
+             data.status in ['pending', 'approved', 'rejected'] &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidNotification(data) {
+      return data.title is string && data.title.size() > 0 && data.title.size() < 200 &&
+             data.message is string && data.message.size() > 0 && data.message.size() < 2000 &&
+             data.createdAt is timestamp;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /notifications/{notificationId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin() && isValidNotification(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /users/{userId} {
+      allow get: if isAuthenticated() || isAdmin();
+      allow list: if isAdmin() || (isAuthenticated() && resource.data.referralCode != null);
+      allow create: if isOwner(userId) && 
+                      isValidUser(request.resource.data, userId) &&
+                      (request.resource.data.role == 'user' || isAdmin()) &&
+                      request.resource.data.balance == 0;
+      allow update: if isAdmin() || (
+        isAuthenticated() && 
+        isValidUser(request.resource.data, userId) &&
+        request.resource.data.role == resource.data.role &&
+        request.resource.data.uid == resource.data.uid &&
+        (
+          isOwner(userId) || 
+          // Allow referral commission increment by others
+          (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['balance', 'totalCommissionsEarned']) &&
+           request.resource.data.balance > resource.data.balance)
+        )
+      );
+      allow delete: if isAdmin();
+    }
+
+    match /investments/{investmentId} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() && 
+                      request.resource.data.userId == request.auth.uid && 
+                      isValidInvestment(request.resource.data) &&
+                      (request.resource.data.status == 'pending' || request.resource.data.status == 'active');
+      allow update: if isAdmin() || (
+        isAuthenticated() && 
+        resource.data.userId == request.auth.uid && 
+        isValidInvestment(request.resource.data) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastPayoutDate'])
+      );
+      allow delete: if isAdmin();
+    }
+
+    match /deposits/{depositId} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() && 
+                      request.resource.data.userId == request.auth.uid && 
+                      isValidDeposit(request.resource.data) &&
+                      request.resource.data.status == 'pending';
+      allow update, delete: if isAdmin();
+    }
+
+    match /withdrawals/{withdrawalId} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() && 
+                      request.resource.data.userId == request.auth.uid && 
+                      isValidWithdrawal(request.resource.data) &&
+                      request.resource.data.status == 'pending';
+      allow update, delete: if isAdmin();
+    }
+
+    match /referrals/{referralId} {
+      allow read: if isAuthenticated() && (resource.data.referrerUid == request.auth.uid || resource.data.referredUid == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated();
+      allow update: if isAdmin() || (
+        isAuthenticated() && 
+        resource.data.referredUid == request.auth.uid && 
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isActiveInvestor'])
+      );
+      allow delete: if isAdmin();
+    }
+  }
+}
