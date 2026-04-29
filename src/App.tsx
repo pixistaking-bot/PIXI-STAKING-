@@ -190,7 +190,110 @@ const STAKING_PLANS = [
 
 // --- Components ---
 
+// --- Admin Dashboard Payout Logic ---
+const AdminPayoutProcessor = ({ investments, onPayoutSuccess }: { investments: Investment[], onPayoutSuccess: () => void }) => {
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [log, setLog] = useState<string[]>([]);
+
+  const activeInvestments = investments.filter(i => i.status === 'active');
+  const now = new Date();
+
+  const dueInvestments = activeInvestments.filter(inv => {
+    const lastPayout = inv.lastPayoutDate?.seconds 
+      ? new Date(inv.lastPayoutDate.seconds * 1000) 
+      : new Date(inv.startDate?.seconds * 1000);
+    const diffTime = now.getTime() - lastPayout.getTime();
+    return Math.floor(diffTime / (1000 * 60 * 60 * 24)) >= 1;
+  });
+
+  const processPayouts = async () => {
+    if (isProcessing || dueInvestments.length === 0) return;
+    setIsProcessing(true);
+    setLog(["Starting payout batch..."]);
+
+    try {
+      const batch = writeBatch(db);
+      let count = 0;
+
+      for (const inv of dueInvestments) {
+        const plan = STAKING_PLANS.find(p => p.id === inv.planId) || STAKING_PLANS[1];
+        const lastPayout = inv.lastPayoutDate?.seconds 
+          ? new Date(inv.lastPayoutDate.seconds * 1000) 
+          : new Date(inv.startDate?.seconds * 1000);
+        
+        const diffTime = now.getTime() - lastPayout.getTime();
+        const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+        
+        if (diffDays >= 1) {
+          const payoutAmount = inv.amount * plan.dailyPayout * diffDays;
+          
+          // Update user balance
+          const uRef = doc(db, "users", inv.userId);
+          batch.update(uRef, { 
+            balance: increment(payoutAmount),
+            // Note: In a real app, we'd also handle referral commissions here if they are daily
+          });
+
+          // Update investment last payout date
+          const invRef = doc(db, "investments", inv.id);
+          batch.update(invRef, { lastPayoutDate: serverTimestamp() });
+
+          // Check if ended
+          const endDate = new Date(inv.endDate?.seconds * 1000);
+          if (now >= endDate) {
+            batch.update(invRef, { status: "completed" });
+          }
+
+          count++;
+        }
+      }
+
+      if (count > 0) {
+        await batch.commit();
+        setLog(prev => [...prev, `Successfully processed ${count} payouts.`]);
+        onPayoutSuccess();
+      } else {
+        setLog(prev => [...prev, "No payouts were actually due."]);
+      }
+    } catch (err: any) {
+      console.error("Payout error:", err);
+      setLog(prev => [...prev, `Error: ${err.message}`]);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  if (dueInvestments.length === 0) return null;
+
+  return (
+    <div className="bg-amber-50 border border-amber-200 rounded-2xl p-6 mb-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-amber-900 font-bold flex items-center">
+            <Coins className="w-5 h-5 mr-2" />
+            Payouts Pending
+          </h3>
+          <p className="text-amber-700 text-sm">{dueInvestments.length} active investments are due for payout.</p>
+        </div>
+        <button 
+          onClick={processPayouts}
+          disabled={isProcessing}
+          className="bg-amber-600 text-white px-6 py-2 rounded-xl font-bold hover:bg-amber-700 transition-all shadow-md shadow-amber-200 disabled:opacity-50"
+        >
+          {isProcessing ? "Processing..." : "Process Now"}
+        </button>
+      </div>
+      {log.length > 0 && (
+        <div className="mt-4 p-3 bg-white/50 rounded-lg text-[10px] font-mono text-amber-800 max-h-24 overflow-y-auto">
+          {log.map((line, i) => <div key={i}>{line}</div>)}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const PixiCoin = ({ size = 'md' }: { size?: 'sm' | 'md' | 'lg' }) => {
+
   const [hasError, setHasError] = useState(false);
   const sizeClasses = {
     sm: 'w-10 h-10',
@@ -669,20 +772,30 @@ const PlansPage = ({ profile, onInvest }: { profile: UserProfile | null, onInves
                 <span className="text-gray-500">Max Deposit</span>
                 <span className="font-bold text-gray-900">${plan.max} USDT</span>
               </div>
-              <div className="pt-4 flex space-x-2">
-                <input 
-                  type="number" 
-                  placeholder="Amount"
-                  value={amounts[plan.id] || ''}
-                  onChange={(e) => setAmounts({ ...amounts, [plan.id]: e.target.value })}
-                  className="flex-1 px-4 py-2 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-amber-500"
-                />
+              <div className="pt-4 flex flex-col space-y-3">
+                <div className="relative">
+                  <input 
+                    type="number" 
+                    placeholder="Enter amount"
+                    value={amounts[plan.id] || ''}
+                    onChange={(e) => setAmounts({ ...amounts, [plan.id]: e.target.value })}
+                    className="w-full px-4 py-3 border border-gray-200 rounded-xl outline-none focus:ring-2 focus:ring-amber-500 bg-gray-50/50"
+                  />
+                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs font-bold text-gray-400">USDT</span>
+                </div>
                 <button 
                   onClick={() => handleInvest(plan)}
                   disabled={loading === plan.id}
-                  className="bg-amber-600 text-white px-6 py-2 rounded-lg font-bold hover:bg-amber-700 transition-colors disabled:opacity-50 shadow-md shadow-amber-200"
+                  className="w-full bg-amber-600 text-white py-3 rounded-xl font-bold hover:bg-amber-700 transition-all active:scale-[0.98] disabled:opacity-50 shadow-md shadow-amber-100 flex items-center justify-center space-x-2"
                 >
-                  {loading === plan.id ? '...' : 'Stake'}
+                  {loading === plan.id ? (
+                    <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  ) : (
+                    <>
+                      <TrendingUp className="w-4 h-4" />
+                      <span>Stake Now</span>
+                    </>
+                  )}
                 </button>
               </div>
             </div>
@@ -1348,6 +1461,8 @@ const AdminDashboard = () => {
   return (
     <div className="space-y-6 pb-20">
       <h2 className="text-2xl font-bold text-gray-900">Admin Dashboard</h2>
+
+      <AdminPayoutProcessor investments={investments} onPayoutSuccess={() => {}} />
 
       <AnimatePresence>
         {adminStatus && (
