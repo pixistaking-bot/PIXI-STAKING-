@@ -240,13 +240,13 @@ const Navbar = ({ user, profile, onLogout }: { user: FirebaseUser | null, profil
   }
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 px-4 py-2 z-50 md:top-0 md:bottom-auto md:border-b md:border-t-0">
-      <div className="max-w-7xl mx-auto flex justify-around md:justify-between items-center">
-        <div className="hidden md:flex items-center space-x-2 font-bold text-xl text-indigo-600">
+    <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 px-4 py-2 z-50 md:top-0 md:bottom-auto md:border-b md:border-t-0 shadow-sm">
+      <div className="max-w-7xl mx-auto flex justify-around md:justify-between items-center sm:px-6 lg:px-8">
+        <div className="hidden md:flex items-center space-x-3 font-bold text-xl text-indigo-600">
           <PixiCoin size="sm" />
-          <span>PIXI STAKING</span>
+          <span className="tracking-tight">PIXI STAKING</span>
         </div>
-        <div className="flex space-x-4 md:space-x-8">
+        <div className="flex space-x-1 sm:space-x-4 md:space-x-8 overflow-x-auto no-scrollbar">
           {navItems.map((item) => {
             const Icon = item.icon;
             const isActive = location.pathname === item.path;
@@ -557,20 +557,31 @@ const HomePage = ({ profile, investments }: { profile: UserProfile | null, inves
         </p>
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
-        <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex flex-col justify-center">
           <div className="flex items-center space-x-2 text-gray-500 mb-2">
             <TrendingUp className="w-4 h-4" />
-            <span className="text-xs font-medium">PIXI STAKING Status</span>
+            <span className="text-xs font-medium uppercase tracking-wider">PIXI STAKING Status</span>
           </div>
-          <p className="text-xl font-bold text-gray-900">${totalInvested.toFixed(2)}</p>
+          <p className="text-2xl font-black text-gray-900">${totalInvested.toFixed(2)}</p>
         </div>
-        <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100">
+        <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex flex-col justify-center">
           <div className="flex items-center space-x-2 text-gray-500 mb-2">
             <Users className="w-4 h-4" />
-            <span className="text-xs font-medium">My Code</span>
+            <span className="text-xs font-medium uppercase tracking-wider">My Code</span>
           </div>
-          <p className="text-sm font-bold text-amber-600">{profile?.referralCode}</p>
+          <div className="flex items-center justify-between">
+            <p className="text-lg font-black text-amber-600">{profile?.referralCode}</p>
+            <button 
+              onClick={() => {
+                navigator.clipboard.writeText(profile?.referralCode || '');
+                alert('Copied!');
+              }}
+              className="p-1.5 text-amber-600 hover:bg-amber-50 rounded-lg transition-colors"
+            >
+              <Copy className="w-4 h-4" />
+            </button>
+          </div>
         </div>
       </div>
 
@@ -631,7 +642,7 @@ const PlansPage = ({ profile, onInvest }: { profile: UserProfile | null, onInves
   return (
     <div className="space-y-6">
       <h2 className="text-2xl font-bold text-gray-900">Investment Plans</h2>
-      <div className="grid gap-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
         {STAKING_PLANS.map((plan) => (
           <div key={plan.id} className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 relative overflow-hidden">
             {plan.oneTime && (
@@ -985,18 +996,18 @@ const TeamPage = ({ profile }: { profile: UserProfile | null }) => {
     <div className="space-y-6">
       <h2 className="text-2xl font-bold text-gray-900">My Team</h2>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100">
-          <p className="text-xs text-gray-500 font-bold uppercase mb-1">Registered Users</p>
-          <p className="text-2xl font-black text-indigo-600">{registeredCount}</p>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
+          <p className="text-xs text-gray-400 font-bold uppercase mb-1 tracking-wider">Registered Users</p>
+          <p className="text-3xl font-black text-indigo-600">{registeredCount}</p>
         </div>
-        <div className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100">
-          <p className="text-xs text-gray-500 font-bold uppercase mb-1">Active Investors</p>
-          <p className="text-2xl font-black text-green-600">{activeInvestorCount}</p>
+        <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
+          <p className="text-xs text-gray-400 font-bold uppercase mb-1 tracking-wider">Active Investors</p>
+          <p className="text-3xl font-black text-green-600">{activeInvestorCount}</p>
         </div>
-        <div className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100">
-          <p className="text-xs text-gray-500 font-bold uppercase mb-1">Commissions Earned</p>
-          <p className="text-2xl font-black text-purple-600">${totalCommissions.toFixed(2)}</p>
+        <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
+          <p className="text-xs text-gray-400 font-bold uppercase mb-1 tracking-wider">Commissions Earned</p>
+          <p className="text-3xl font-black text-purple-600">${totalCommissions.toFixed(2)}</p>
         </div>
       </div>
       
@@ -1373,7 +1384,7 @@ const AdminDashboard = () => {
         </div>
       </div>
 
-      <div className="flex bg-gray-100 p-1 rounded-xl overflow-x-auto">
+      <div className="flex bg-gray-100 p-1 rounded-xl overflow-x-auto no-scrollbar">
         {(['users', 'deposits', 'withdrawals', 'investments', 'notifications'] as const).map((tab) => (
           <button
             key={tab}
@@ -2066,7 +2077,7 @@ function AppContent() {
       <div className="min-h-screen bg-gray-50 pb-20 md:pb-0 md:pt-20">
         <Navbar user={user} profile={profile} onLogout={handleLogout} />
         
-        <main className="max-w-4xl mx-auto px-4 py-6">
+        <main className="max-w-5xl mx-auto px-4 py-8">
           <Routes>
             <Route path="/login" element={!user ? <LoginPage onLogin={handleLogin} onGoogleLogin={handleGoogleLogin} /> : <Navigate to="/" />} />
             
