@@ -40,12 +40,15 @@
       "type": "object",
       "properties": {
         "userId": { "type": "string" },
+        "userEmail": { "type": "string" },
         "amount": { "type": "number" },
+        "network": { "type": "string", "enum": ["BEP20", "TRC20"] },
         "screenshotUrl": { "type": "string" },
         "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
-        "createdAt": { "type": "string", "format": "date-time" }
+        "createdAt": { "type": "string", "format": "date-time" },
+        "processedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["userId", "amount", "status", "createdAt"]
+      "required": ["userId", "userEmail", "amount", "network", "screenshotUrl", "status", "createdAt"]
     },
     "Withdrawal": {
       "title": "Withdrawal",
@@ -53,12 +56,15 @@
       "type": "object",
       "properties": {
         "userId": { "type": "string" },
+        "userEmail": { "type": "string" },
         "amount": { "type": "number" },
+        "network": { "type": "string", "enum": ["BEP20", "TRC20"] },
         "walletAddress": { "type": "string" },
         "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
-        "createdAt": { "type": "string", "format": "date-time" }
+        "createdAt": { "type": "string", "format": "date-time" },
+        "processedAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["userId", "amount", "walletAddress", "status", "createdAt"]
+      "required": ["userId", "userEmail", "amount", "network", "walletAddress", "status", "createdAt"]
     },
     "Referral": {
       "title": "Referral",
@@ -69,6 +75,7 @@
         "referredUid": { "type": "string" },
         "referredEmail": { "type": "string" },
         "isActiveInvestor": { "type": "boolean" },
+        "commissionEarned": { "type": "number" },
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["referrerUid", "referredUid", "referredEmail", "createdAt"]
@@ -83,6 +90,15 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["title", "message", "createdAt"]
+    },
+    "ReferralCode": {
+      "title": "Referral Code",
+      "description": "Mapping from referral code to user ID",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" }
+      },
+      "required": ["uid"]
     }
   },
   "firestore": {
@@ -109,6 +125,10 @@
     "/notifications/{notificationId}": {
       "schema": "Notification",
       "description": "System notifications"
+    },
+    "/referralCodes/{code}": {
+      "schema": "ReferralCode",
+      "description": "Mapping of referral codes"
     }
   }
 }

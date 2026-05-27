@@ -1,12 +1,13 @@
 import React, { useState, useEffect, Component } from 'react';
 import { 
-  BrowserRouter as Router, 
+  HashRouter as Router, 
   Routes, 
   Route, 
   Navigate, 
   Link, 
   useLocation,
-  useNavigate
+  useNavigate,
+  useSearchParams
 } from 'react-router-dom';
 import { 
   onAuthStateChanged, 
@@ -15,7 +16,9 @@ import {
   signOut,
   signInWithPopup,
   GoogleAuthProvider,
-  User as FirebaseUser
+  User as FirebaseUser,
+  sendEmailVerification,
+  reload
 } from 'firebase/auth';
 import { 
   doc, 
@@ -37,7 +40,14 @@ import {
   writeBatch,
   increment
 } from 'firebase/firestore';
-import { auth, db } from './firebase';
+import { 
+  ref, 
+  uploadBytes, 
+  uploadString,
+  getDownloadURL,
+  deleteObject
+} from 'firebase/storage';
+import { auth, db, storage } from './firebase';
 
 enum OperationType {
   CREATE = 'create',
@@ -68,8 +78,9 @@ interface FirestoreErrorInfo {
 }
 
 function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errMessage = error instanceof Error ? error.message : String(error);
   const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
+    error: errMessage,
     authInfo: {
       userId: auth.currentUser?.uid,
       email: auth.currentUser?.email,
@@ -87,19 +98,14 @@ function handleFirestoreError(error: unknown, operationType: OperationType, path
     path
   }
   console.error('Firestore Error: ', JSON.stringify(errInfo));
+  if (errMessage.includes('permission-denied') || errMessage.includes('Permissions')) {
+    alert(`SECURITY ERROR [${operationType} on ${path}]: Access Denied. Check your admin role or session.`);
+  } else {
+    alert(`DATABASE ERROR [${operationType} on ${path}]: ${errMessage}`);
+  }
   throw new Error(JSON.stringify(errInfo));
 }
 
-async function testConnection() {
-  try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch (error) {
-    if(error instanceof Error && error.message.includes('the client is offline')) {
-      console.error("Please check your Firebase configuration. ");
-    }
-  }
-}
-testConnection();
 import { 
   Home, 
   TrendingUp, 
@@ -117,7 +123,12 @@ import {
   Copy,
   Check,
   Coins,
-  Bell
+  Bell,
+  Mail,
+  Info,
+  ArrowDownLeft,
+  ArrowUpRight,
+  RefreshCw
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -131,6 +142,8 @@ interface UserProfile {
   referredBy: string | null;
   role: 'admin' | 'user';
   status: 'active' | 'banned' | 'paused';
+  isActiveInvestor?: boolean;
+  knownDevices?: string[];
   createdAt: any;
 }
 
@@ -152,6 +165,7 @@ interface Deposit {
   userId: string;
   userEmail?: string;
   amount: number;
+  network?: 'BEP20' | 'TRC20';
   screenshotUrl: string;
   status: 'pending' | 'approved' | 'rejected';
   createdAt: any;
@@ -178,9 +192,47 @@ interface Notification {
 // --- Constants ---
 const ADMIN_USERNAME = "Adminpixi25";
 const ADMIN_PASSWORD = "ibaigini2025";
-const ADMIN_EMAIL = "admin@pixi.com";
+const ADMIN_EMAILS = ["admin@pixi.com", "pixistaking@gmail.com", "adminpixi25@gmail.com"];
+const ADMIN_EMAIL = ADMIN_EMAILS[0];
 const BEP20_ADDRESS = "0xa703cfc51c14d2f9eee34bb4cbcdfbf2c9a92ee5";
 const TRC20_ADDRESS = "TQ9YQZkbnx5cszhVZvZd7wtBbwxYGNRGVV";
+
+// --- Helper: Image Compression ---
+const compressImage = (dataUrl: string, maxWidth = 1000, maxHeight = 1000, quality = 0.7): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.src = dataUrl;
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      let width = img.width;
+      let height = img.height;
+
+      if (width > height) {
+        if (width > maxWidth) {
+          height *= maxWidth / width;
+          width = maxWidth;
+        }
+      } else {
+        if (height > maxHeight) {
+          width *= maxHeight / height;
+          height = maxHeight;
+        }
+      }
+
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        reject(new Error('Canvas context failed'));
+        return;
+      }
+      ctx.drawImage(img, 0, 0, width, height);
+      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = (e) => reject(new Error('Image processing failed'));
+  });
+};
 
 const STAKING_PLANS = [
   { id: 'starter', name: 'Starter Plan', min: 10, max: 10, duration: 5, dailyPayout: 0.1, oneTime: true },
@@ -194,100 +246,141 @@ const STAKING_PLANS = [
 const AdminPayoutProcessor = ({ investments, onPayoutSuccess }: { investments: Investment[], onPayoutSuccess: () => void }) => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [log, setLog] = useState<string[]>([]);
-
-  const activeInvestments = investments.filter(i => i.status === 'active');
+  const [showLog, setShowLog] = useState(false);
   const now = new Date();
 
+  const activeInvestments = investments.filter(i => i.status === 'active');
   const dueInvestments = activeInvestments.filter(inv => {
+    if (!inv.startDate || !inv.amount) return false;
     const lastPayout = inv.lastPayoutDate?.seconds 
       ? new Date(inv.lastPayoutDate.seconds * 1000) 
-      : new Date(inv.startDate?.seconds * 1000);
+      : new Date(inv.startDate.seconds * 1000);
+    
     const diffTime = now.getTime() - lastPayout.getTime();
-    return Math.floor(diffTime / (1000 * 60 * 60 * 24)) >= 1;
+    const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+    return diffDays >= 1;
   });
 
   const processPayouts = async () => {
     if (isProcessing || dueInvestments.length === 0) return;
     setIsProcessing(true);
-    setLog(["Starting payout batch..."]);
+    const triggerNow = new Date();
+    setLog(prev => [...prev, `${triggerNow.toLocaleTimeString()}: Processing ${dueInvestments.length} investments...`]);
 
     try {
+      // Use batches but check for concurrent updates by verifying against current state
       const batch = writeBatch(db);
       let count = 0;
+      let capitalRefundCount = 0;
+      const userPayoutTotals: Record<string, number> = {};
 
       for (const inv of dueInvestments) {
         const plan = STAKING_PLANS.find(p => p.id === inv.planId) || STAKING_PLANS[1];
         const lastPayout = inv.lastPayoutDate?.seconds 
           ? new Date(inv.lastPayoutDate.seconds * 1000) 
-          : new Date(inv.startDate?.seconds * 1000);
+          : new Date(inv.startDate.seconds * 1000);
         
-        const diffTime = now.getTime() - lastPayout.getTime();
+        const diffTime = triggerNow.getTime() - lastPayout.getTime();
         const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
         
         if (diffDays >= 1) {
           const payoutAmount = inv.amount * plan.dailyPayout * diffDays;
-          
-          // Update user balance
-          const uRef = doc(db, "users", inv.userId);
-          batch.update(uRef, { 
-            balance: increment(payoutAmount),
-            // Note: In a real app, we'd also handle referral commissions here if they are daily
-          });
+          userPayoutTotals[inv.userId] = (userPayoutTotals[inv.userId] || 0) + payoutAmount;
 
-          // Update investment last payout date
           const invRef = doc(db, "investments", inv.id);
-          batch.update(invRef, { lastPayoutDate: serverTimestamp() });
+          const newPayoutTime = new Date(lastPayout.getTime() + diffDays * 24 * 60 * 60 * 1000);
+          batch.update(invRef, { lastPayoutDate: Timestamp.fromDate(newPayoutTime) });
 
-          // Check if ended
-          const endDate = new Date(inv.endDate?.seconds * 1000);
-          if (now >= endDate) {
-            batch.update(invRef, { status: "completed" });
+          if (inv.endDate?.seconds) {
+            const endDate = new Date(inv.endDate.seconds * 1000);
+            if (triggerNow >= endDate) {
+              batch.update(invRef, { status: "completed" });
+              
+              if (inv.planId === 'starter') {
+                const refundAmount = inv.amount;
+                userPayoutTotals[inv.userId] = (userPayoutTotals[inv.userId] || 0) + refundAmount;
+                capitalRefundCount++;
+                
+                const notifRef = doc(collection(db, "notifications"));
+                batch.set(notifRef, {
+                  userId: inv.userId,
+                  title: "Capital Refunded",
+                  message: `Your initial investment of ${refundAmount.toFixed(2)} USDT (${inv.planName}) has been returned.`,
+                  createdAt: serverTimestamp()
+                });
+              }
+            }
           }
-
           count++;
         }
       }
 
+      for (const [userId, total] of Object.entries(userPayoutTotals)) {
+        batch.update(doc(db, "users", userId), { balance: increment(total) });
+        
+        const notifRef = doc(collection(db, "notifications"));
+        batch.set(notifRef, {
+          userId,
+          title: "Staking Dividends",
+          message: `You earned ${total.toFixed(2)} USDT in staking rewards!`,
+          createdAt: serverTimestamp()
+        });
+      }
+
       if (count > 0) {
         await batch.commit();
-        setLog(prev => [...prev, `Successfully processed ${count} payouts.`]);
+        setLog(prev => [...prev, `Success: Credited rewards for ${count} stakes. Refunds: ${capitalRefundCount}.`]);
         onPayoutSuccess();
       } else {
-        setLog(prev => [...prev, "No payouts were actually due."]);
+        setLog(prev => [...prev, "No payouts were eligible at this time."]);
       }
     } catch (err: any) {
-      console.error("Payout error:", err);
-      setLog(prev => [...prev, `Error: ${err.message}`]);
+      console.error("Payout Processor Error:", err);
+      setLog(prev => [...prev, `Critical Error: ${err.message}`]);
     } finally {
       setIsProcessing(false);
     }
   };
 
-  if (dueInvestments.length === 0) return null;
+  useEffect(() => {
+    // Semi-auto trigger: Only if admin hasn't run it in this session yet
+    if (dueInvestments.length > 0 && !isProcessing && log.length === 0) {
+      const timer = setTimeout(processPayouts, 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [dueInvestments.length]);
 
   return (
-    <div className="bg-amber-50 border border-amber-200 rounded-2xl p-6 mb-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h3 className="text-amber-900 font-bold flex items-center">
-            <Coins className="w-5 h-5 mr-2" />
-            Payouts Pending
-          </h3>
-          <p className="text-amber-700 text-sm">{dueInvestments.length} active investments are due for payout.</p>
-        </div>
-        <button 
-          onClick={processPayouts}
-          disabled={isProcessing}
-          className="bg-amber-600 text-white px-6 py-2 rounded-xl font-bold hover:bg-amber-700 transition-all shadow-md shadow-amber-200 disabled:opacity-50"
-        >
-          {isProcessing ? "Processing..." : "Process Now"}
-        </button>
-      </div>
+    <div className="fixed top-20 right-4 z-[55] flex flex-col items-end space-y-2 group">
       {log.length > 0 && (
-        <div className="mt-4 p-3 bg-white/50 rounded-lg text-[10px] font-mono text-amber-800 max-h-24 overflow-y-auto">
-          {log.map((line, i) => <div key={i}>{line}</div>)}
+        <div className={`text-[10px] bg-black/80 text-white p-2 rounded-lg max-w-[200px] shadow-xl overflow-hidden transition-all duration-300 ${showLog ? 'opacity-100 max-h-48 overflow-y-auto' : 'opacity-0 max-h-0 pointer-events-none'}`}>
+          {log.map((l, i) => <p key={i} className="border-b border-white/10 pb-1 mb-1">{l}</p>)}
         </div>
       )}
+      <div className="flex space-x-2">
+        {log.length > 0 && (
+          <button 
+            onClick={() => setShowLog(!showLog)}
+            className="bg-white/90 backdrop-blur border border-gray-200 p-2 rounded-full shadow-lg text-gray-500 hover:text-amber-600 transition-colors"
+          >
+            <Clock className="w-5 h-5" />
+          </button>
+        )}
+        <button 
+          onClick={processPayouts}
+          disabled={isProcessing || dueInvestments.length === 0}
+          className={`px-4 py-2 rounded-full shadow-xl font-bold text-xs flex items-center space-x-2 transition-all active:scale-95 ${
+            dueInvestments.length > 0 
+              ? 'bg-amber-500 text-white animate-pulse' 
+              : 'bg-white text-gray-400 border border-gray-100'
+          }`}
+        >
+          {isProcessing ? (
+            <div className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+          ) : <TrendingUp className="w-4 h-4" />}
+          <span>{isProcessing ? 'Processing...' : (dueInvestments.length > 0 ? `Pay ${dueInvestments.length} Stakes` : 'Payouts Up-To-Date')}</span>
+        </button>
+      </div>
     </div>
   );
 };
@@ -314,7 +407,7 @@ const PixiCoin = ({ size = 'md' }: { size?: 'sm' | 'md' | 'lg' }) => {
   return (
     <div className={`${sizeClasses[size]} relative flex items-center justify-center overflow-hidden rounded-full shadow-lg`}>
       <img 
-        src="/pixi_logo.png" 
+        src="https://lh3.googleusercontent.com/d/1SBsfbqOSjYTcHzisVqfn_uqOeoAq-T7f" 
         alt="PIXI COIN"
         className="w-full h-full object-cover"
         referrerPolicy="no-referrer"
@@ -324,7 +417,7 @@ const PixiCoin = ({ size = 'md' }: { size?: 'sm' | 'md' | 'lg' }) => {
   );
 };
 
-const Navbar = ({ user, profile, onLogout }: { user: FirebaseUser | null, profile: UserProfile | null, onLogout: () => void }) => {
+const Navbar = ({ user, profile, onLogout, notificationCount = 0 }: { user: FirebaseUser | null, profile: UserProfile | null, onLogout: () => void, notificationCount?: number }) => {
   const location = useLocation();
   
   if (!user) return null;
@@ -335,7 +428,7 @@ const Navbar = ({ user, profile, onLogout }: { user: FirebaseUser | null, profil
     { path: '/deposit', label: 'Deposit', icon: Download },
     { path: '/withdrawal', label: 'Withdraw', icon: Upload },
     { path: '/team', label: 'Team', icon: Users },
-    { path: '/notifications', label: 'Updates', icon: Bell },
+    { path: '/notifications', label: 'Updates', icon: Bell, badge: notificationCount },
   ];
 
   if (profile?.role === 'admin') {
@@ -357,11 +450,18 @@ const Navbar = ({ user, profile, onLogout }: { user: FirebaseUser | null, profil
               <Link 
                 key={item.path} 
                 to={item.path}
-                className={`flex flex-col md:flex-row items-center space-y-1 md:space-y-0 md:space-x-2 p-2 rounded-lg transition-colors ${
+                className={`flex flex-col md:flex-row items-center space-y-1 md:space-y-0 md:space-x-2 p-2 rounded-lg transition-colors relative ${
                   isActive ? 'text-amber-600 bg-amber-50' : 'text-gray-500 hover:text-amber-600 hover:bg-gray-50'
                 }`}
               >
-                <Icon className="w-6 h-6" />
+                <div className="relative">
+                  <Icon className="w-6 h-6" />
+                  {item.badge && item.badge > 0 && (
+                    <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[8px] font-black w-4 h-4 flex items-center justify-center rounded-full border-2 border-white animate-pulse">
+                      {item.badge > 9 ? '9+' : item.badge}
+                    </span>
+                  )}
+                </div>
                 <span className="text-xs md:text-sm font-medium">{item.label}</span>
               </Link>
             );
@@ -379,22 +479,49 @@ const Navbar = ({ user, profile, onLogout }: { user: FirebaseUser | null, profil
   );
 };
 
-const LoginPage = ({ onLogin, onGoogleLogin }: { 
+const LoginPage = ({ onLogin, onGoogleLogin, initiallySignup = false }: { 
   onLogin: (email: string, pass: string, isSignup: boolean, referralCode?: string) => Promise<void>,
-  onGoogleLogin: (referralCode?: string) => Promise<void>
+  onGoogleLogin: (referralCode?: string) => Promise<void>,
+  initiallySignup?: boolean
 }) => {
-  const [isSignup, setIsSignup] = useState(false);
+  const [isSignup, setIsSignup] = useState(() => {
+    // Initial state calculation to avoid flashing
+    const hashParams = new URLSearchParams(window.location.hash.split('?')[1] || '');
+    const searchParams = new URLSearchParams(window.location.search);
+    const ref = hashParams.get('ref') || hashParams.get('referral') || searchParams.get('ref') || searchParams.get('referral');
+    return initiallySignup || !!ref;
+  });
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [referralCode, setReferralCode] = useState('');
+  const [referralCode, setReferralCode] = useState(() => {
+    const hashParams = new URLSearchParams(window.location.hash.split('?')[1] || '');
+    const searchParams = new URLSearchParams(window.location.search);
+    return hashParams.get('ref') || hashParams.get('referral') || searchParams.get('ref') || searchParams.get('referral') || '';
+  });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [searchParams] = useSearchParams();
+
+  useEffect(() => {
+    const hashRef = searchParams.get('ref') || searchParams.get('referral');
+    const urlParams = new URLSearchParams(window.location.search);
+    const topLevelRef = urlParams.get('ref') || urlParams.get('referral');
+    
+    const ref = hashRef || topLevelRef;
+    
+    if (ref) {
+      setReferralCode(ref);
+      setIsSignup(true);
+    } else if (initiallySignup) {
+      setIsSignup(true);
+    }
+  }, [searchParams, initiallySignup]);
 
   const handleGoogleSignIn = async () => {
     setLoading(true);
     setError('');
     try {
-      await onGoogleLogin(isSignup ? referralCode.trim() : undefined);
+      await onGoogleLogin(referralCode.trim() || undefined);
     } catch (err: any) {
       if (err.code === 'auth/popup-closed-by-user') {
         // User just closed the popup, don't show a scary error
@@ -438,25 +565,26 @@ const LoginPage = ({ onLogin, onGoogleLogin }: {
       await onLogin(email, trimmedPassword, isSignup, referralCode.trim());
     } catch (err: any) {
       console.error("Auth error details:", err);
+      const errorCode = err.code || (err.message && err.message.includes('auth/') ? err.message.match(/auth\/[a-z0-9-]+/)?.[0] : null);
       let message = err.message || 'Authentication failed';
       
       // Handle Firebase specific error codes
-      if (err.code === 'auth/invalid-email') message = 'Invalid email format.';
-      if (err.code === 'auth/user-not-found') message = 'User not found. Please sign up if you don\'t have an account.';
-      if (err.code === 'auth/wrong-password') message = 'Incorrect password. Please try again.';
-      if (err.code === 'auth/invalid-credential') {
-        message = 'Authentication failed. This usually means the Email/Password provider is not enabled in your Firebase Console, or the credentials/domain are incorrect.';
+      if (errorCode === 'auth/invalid-email') message = 'Invalid email format.';
+      if (errorCode === 'auth/user-not-found') message = 'User not found. Please sign up if you don\'t have an account.';
+      if (errorCode === 'auth/wrong-password') message = 'Incorrect password. Please try again.';
+      if (errorCode === 'auth/too-many-requests') message = 'Too many failed attempts. Please try again later.';
+      if (errorCode === 'auth/email-already-in-use') {
+        message = 'This account already exists. Please login instead.';
+        setIsSignup(false); // Auto-switch to login mode
       }
-      if (err.code === 'auth/email-already-in-use') message = 'This account already exists. Please login instead.';
-      if (err.code === 'auth/weak-password') message = 'Password should be at least 6 characters.';
-      if (err.code === 'auth/operation-not-allowed') {
+      if (errorCode === 'auth/invalid-credential') {
+        message = 'Authentication failed. Please check your credentials. If you are an admin, ensure your password is correct.';
+      }
+      if (errorCode === 'auth/weak-password') message = 'Password should be at least 6 characters.';
+      if (errorCode === 'auth/operation-not-allowed') {
         message = 'The requested authentication method (Email/Password) is not enabled in your Firebase project.';
       }
-      if (err.code === 'auth/too-many-requests') message = 'Too many failed attempts. Please try again later.';
-      if (err.code === 'auth/network-request-failed') message = 'Network error. Please check your internet connection.';
-      if (err.code === 'auth/unauthorized-domain') {
-        message = 'This domain is not authorized for Firebase Authentication. Please add it to the authorized domains list in the Firebase Console.';
-      }
+      if (errorCode === 'auth/network-request-failed') message = 'Network error. Please check your internet connection.';
       
       setError(message);
     } finally {
@@ -630,10 +758,23 @@ const LoginPage = ({ onLogin, onGoogleLogin }: {
   );
 };
 
-const HomePage = ({ profile, investments }: { profile: UserProfile | null, investments: Investment[] }) => {
+const HomePage = ({ profile, investments, deposits, withdrawals }: { profile: UserProfile | null, investments: Investment[], deposits: Deposit[], withdrawals: Withdrawal[] }) => {
   const activeInvestments = investments.filter(i => i.status === 'active');
-  const pendingInvestments = investments.filter(i => i.status === 'pending');
   const totalInvested = activeInvestments.reduce((sum, i) => sum + i.amount, 0);
+
+  const pendingDeposits = deposits.filter(d => d.status === 'pending');
+  const pendingWithdrawals = withdrawals.filter(w => w.status === 'pending');
+  const pendingCount = pendingDeposits.length + pendingWithdrawals.length;
+
+  const allRecent = [
+    ...deposits.map(d => ({ ...d, type: 'Deposit', date: d.createdAt })),
+    ...withdrawals.map(w => ({ ...w, type: 'Withdrawal', date: w.createdAt })),
+    ...investments.map(i => ({ ...i, type: 'Staking', amount: i.amount, date: i.startDate }))
+  ].sort((a, b) => {
+    const dateA = a.date?.seconds || 0;
+    const dateB = b.date?.seconds || 0;
+    return dateB - dateA;
+  }).slice(0, 5);
   
   return (
     <div className="space-y-6">
@@ -652,6 +793,20 @@ const HomePage = ({ profile, investments }: { profile: UserProfile | null, inves
           </Link>
         </div>
       </div>
+
+      {pendingCount > 0 && (
+        <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 flex items-center justify-between">
+          <div className="flex items-center space-x-3">
+            <div className="bg-blue-100 p-2 rounded-full">
+              <Clock className="w-5 h-5 text-blue-600" />
+            </div>
+            <div>
+              <p className="text-sm font-bold text-blue-900">{pendingCount} Pending Operation{pendingCount > 1 ? 's' : ''}</p>
+              <p className="text-xs text-blue-700">We are processing your requests.</p>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="bg-amber-50 border border-amber-100 rounded-xl p-3 flex items-start space-x-3">
         <AlertCircle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
@@ -713,6 +868,43 @@ const HomePage = ({ profile, investments }: { profile: UserProfile | null, inves
           )}
         </div>
       </div>
+
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+        <div className="p-4 border-b border-gray-100">
+          <h3 className="font-bold text-gray-900">Recent Activity</h3>
+        </div>
+        <div className="divide-y divide-gray-50">
+          {allRecent.length > 0 ? allRecent.map((item: any) => (
+            <div key={item.id} className="p-4 flex justify-between items-center">
+              <div className="flex items-center space-x-3">
+                <div className={`p-2 rounded-lg ${
+                  item.type === 'Deposit' ? 'bg-green-50 text-green-600' : 
+                  item.type === 'Withdrawal' ? 'bg-red-50 text-red-600' : 'bg-blue-50 text-blue-600'
+                }`}>
+                  {item.type === 'Deposit' ? <ArrowDownLeft className="w-4 h-4" /> : 
+                   item.type === 'Withdrawal' ? <ArrowUpRight className="w-4 h-4" /> : <TrendingUp className="w-4 h-4" />}
+                </div>
+                <div>
+                  <p className="font-bold text-sm text-gray-900">{item.type}</p>
+                  <p className="text-[10px] text-gray-400 uppercase font-black">{item.status}</p>
+                </div>
+              </div>
+              <div className="text-right">
+                <p className={`font-black text-sm ${item.type === 'Deposit' ? 'text-green-600' : 'text-gray-900'}`}>
+                  {item.type === 'Deposit' ? '+' : '-'}${item.amount}
+                </p>
+                <p className="text-[10px] text-gray-400">
+                  {item.createdAt ? new Date(item.createdAt.seconds * 1000).toLocaleDateString() : 'Pending'}
+                </p>
+              </div>
+            </div>
+          )) : (
+            <div className="p-8 text-center text-gray-500">
+              <p className="text-sm">No recent transactions</p>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 };
@@ -735,8 +927,16 @@ const PlansPage = ({ profile, onInvest }: { profile: UserProfile | null, onInves
     setLoading(plan.id);
     try {
       await onInvest(plan, amount);
+      // Success is handled by the parent component's showSuccessAndRedirect
     } catch (err: any) {
-      alert(err.message);
+      let errorMessage = 'An error occurred during staking.';
+      try {
+        const parsed = JSON.parse(err.message);
+        errorMessage = parsed.error || errorMessage;
+      } catch {
+        errorMessage = err.message || errorMessage;
+      }
+      alert(errorMessage);
     } finally {
       setLoading(null);
     }
@@ -806,11 +1006,12 @@ const PlansPage = ({ profile, onInvest }: { profile: UserProfile | null, onInves
   );
 };
 
-const DepositPage = ({ profile, onSuccess }: { profile: UserProfile | null, onSuccess: () => void }) => {
+const DepositPage = ({ profile, user, onSuccess }: { profile: UserProfile | null, user: FirebaseUser, onSuccess: () => void }) => {
   const [network, setNetwork] = useState<'BEP20' | 'TRC20'>('BEP20');
   const [amount, setAmount] = useState('');
   const [screenshot, setScreenshot] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [depositStatus, setDepositStatus] = useState<'idle' | 'processing' | 'submitted'>('idle');
   const [copied, setCopied] = useState(false);
 
   const selectedAddress = network === 'BEP20' ? BEP20_ADDRESS : TRC20_ADDRESS;
@@ -824,71 +1025,119 @@ const DepositPage = ({ profile, onSuccess }: { profile: UserProfile | null, onSu
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      if (file.size > 10 * 1024 * 1024) {
+        alert('File is too large. Max size allowed is 10MB.');
+        return;
+      }
       const reader = new FileReader();
       reader.onloadend = () => {
-        const img = new Image();
-        img.src = reader.result as string;
-        img.onload = () => {
-          const canvas = document.createElement('canvas');
-          let width = img.width;
-          let height = img.height;
-
-          // Max dimensions for compression
-          const MAX_WIDTH = 800;
-          const MAX_HEIGHT = 800;
-
-          if (width > height) {
-            if (width > MAX_WIDTH) {
-              height *= MAX_WIDTH / width;
-              width = MAX_WIDTH;
-            }
-          } else {
-            if (height > MAX_HEIGHT) {
-              width *= MAX_HEIGHT / height;
-              height = MAX_HEIGHT;
-            }
-          }
-
-          canvas.width = width;
-          canvas.height = height;
-          const ctx = canvas.getContext('2d');
-          ctx?.drawImage(img, 0, 0, width, height);
-
-          // Compress to JPEG with 0.7 quality
-          const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.7);
-          setScreenshot(compressedDataUrl);
-        };
+        setScreenshot(reader.result as string);
       };
       reader.readAsDataURL(file);
     }
   };
 
+  const [depositSubStatus, setDepositSubStatus] = useState<string>('');
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!amount || !screenshot) return;
+    const numAmount = parseFloat(amount);
+    if (!amount || isNaN(numAmount) || numAmount <= 0 || !screenshot) {
+      alert('Please enter a valid amount and upload a screenshot.');
+      return;
+    }
     
     setLoading(true);
+    setDepositStatus('processing');
+    setDepositSubStatus('Processing info...');
+
     try {
-      await addDoc(collection(db, 'deposits'), {
-        userId: profile?.uid,
-        userEmail: profile?.email,
-        amount: parseFloat(amount),
-        screenshotUrl: screenshot,
+      let optimizedScreenshot = screenshot;
+      try {
+        // High compression for ultra-fast database sync
+        optimizedScreenshot = await compressImage(screenshot, 450, 450, 0.4);
+      } catch (compErr) {
+        console.warn('Compression error:', compErr);
+      }
+
+      setDepositSubStatus('Syncing with admin...');
+      
+      const depositRef = doc(collection(db, 'deposits'));
+      await setDoc(depositRef, {
+        userId: user?.uid || 'unknown',
+        userEmail: user?.email || 'no-email',
+        amount: numAmount,
+        network: network,
+        screenshotUrl: optimizedScreenshot, // Use base64 directly for instantaneous submission
         status: 'pending',
+        isInternalSeed: false,
         createdAt: serverTimestamp()
       });
-      onSuccess();
-      setAmount('');
-      setScreenshot(null);
+
+      setDepositStatus('submitted');
+      setTimeout(() => {
+        setDepositStatus('idle');
+        setLoading(false);
+        onSuccess();
+      }, 1500);
+
     } catch (err: any) {
-      handleFirestoreError(err, OperationType.WRITE, 'deposits');
-    } finally {
+      setDepositStatus('idle');
       setLoading(false);
+      console.error('Deposit submission failed:', err);
+      let errMsg = err.message || 'Unknown error';
+      if (errMsg.includes('permission-denied')) {
+        errMsg = "Verification error. Please refresh and try again.";
+      }
+      alert('Error: ' + errMsg);
+      try {
+        handleFirestoreError(err, OperationType.WRITE, 'deposits');
+      } catch (e) {}
     }
   };
 
   return (
-    <div className="space-y-6">
+    <div className="relative space-y-6">
+      <AnimatePresence>
+        {depositStatus !== 'idle' && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              className="bg-white rounded-3xl p-8 max-w-sm w-full text-center shadow-2xl relative"
+            >
+              <div className="flex justify-center mb-6">
+                {depositStatus === 'processing' ? (
+                  <div className="w-16 h-16 border-4 border-amber-100 border-t-amber-600 rounded-full animate-spin" />
+                ) : (
+                  <div className="w-16 h-16 bg-green-50 rounded-full flex items-center justify-center">
+                    <CheckCircle2 className="w-10 h-10 text-green-600" />
+                  </div>
+                )}
+              </div>
+              <h3 className="text-xl font-black text-gray-900 mb-2">
+                {depositStatus === 'processing' ? 'Deposit Processing' : 'Deposit Successful'}
+              </h3>
+              <p className="text-sm text-gray-500 leading-relaxed">
+                {depositStatus === 'processing' 
+                  ? depositSubStatus 
+                  : 'Your deposit request has been submitted and is pending proof verification.'}
+              </p>
+              {depositStatus === 'processing' && (
+                <p className="mt-4 text-[10px] text-gray-400 uppercase tracking-widest font-bold">
+                  Do not refresh this page
+                </p>
+              )}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <h2 className="text-2xl font-bold text-gray-900">Deposit USDT</h2>
       
       <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
@@ -917,18 +1166,13 @@ const DepositPage = ({ profile, onSuccess }: { profile: UserProfile | null, onSu
             {copied ? <Check className="w-5 h-5" /> : <Copy className="w-5 h-5" />}
           </button>
         </div>
-        <div className="mt-4 p-3 bg-amber-50 rounded-lg flex items-start space-x-3 border border-amber-100">
-          <AlertCircle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
-          <p className="text-xs text-amber-800">
-            Only send {network} USDT. Using the wrong network will result in permanent loss of funds.
-          </p>
-        </div>
       </div>
 
       <form onSubmit={handleSubmit} className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 space-y-4">
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">Deposit Amount (USDT)</label>
           <input 
+            id="deposit-amount-input"
             type="number" 
             required
             value={amount}
@@ -941,6 +1185,7 @@ const DepositPage = ({ profile, onSuccess }: { profile: UserProfile | null, onSu
           <label className="block text-sm font-medium text-gray-700 mb-1">Proof of Payment (Screenshot)</label>
           <div className="relative border-2 border-dashed border-gray-300 rounded-xl p-8 text-center hover:border-indigo-500 transition-colors group bg-gray-50/50">
             <input 
+              id="deposit-screenshot-upload"
               type="file" 
               accept="image/*"
               onChange={handleFileChange}
@@ -957,6 +1202,7 @@ const DepositPage = ({ profile, onSuccess }: { profile: UserProfile | null, onSu
           </div>
         </div>
         <button 
+          id="submit-deposit-btn"
           type="submit" 
           disabled={loading || !amount || !screenshot}
           className="w-full bg-amber-600 text-white py-3 rounded-xl font-bold hover:bg-amber-700 transition-colors disabled:opacity-50 shadow-lg shadow-amber-200"
@@ -968,29 +1214,42 @@ const DepositPage = ({ profile, onSuccess }: { profile: UserProfile | null, onSu
   );
 };
 
-const WithdrawalPage = ({ profile, onSuccess }: { profile: UserProfile | null, onSuccess: () => void }) => {
+const WithdrawalPage = ({ profile, user, onSuccess }: { profile: UserProfile | null, user: FirebaseUser, onSuccess: () => void }) => {
   const [network, setNetwork] = useState<'BEP20' | 'TRC20'>('BEP20');
   const [amount, setAmount] = useState('');
   const [address, setAddress] = useState('');
   const [loading, setLoading] = useState(false);
+  const [withdrawalStatus, setWithdrawalStatus] = useState<'idle' | 'processing' | 'submitted'>('idle');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const val = parseFloat(amount);
+    if (isNaN(val) || val <= 0) {
+      alert('Please enter a valid amount');
+      return;
+    }
     if (!profile || val > profile.balance) {
-      alert('Insufficient balance');
+      alert(`Insufficient balance. Available: ${profile?.balance.toFixed(2)} USDT`);
       return;
     }
     if (val < 10) {
       alert('Minimum withdrawal is 10 USDT');
       return;
     }
+    if (!address || address.length < 5) {
+      alert('Please enter a valid wallet address');
+      return;
+    }
 
     setLoading(true);
+    setWithdrawalStatus('processing');
     try {
-      await addDoc(collection(db, 'withdrawals'), {
-        userId: profile.uid,
-        userEmail: profile.email,
+      const batch = writeBatch(db);
+      const withdrawalRef = doc(collection(db, 'withdrawals'));
+      
+      batch.set(withdrawalRef, {
+        userId: user.uid,
+        userEmail: user.email || 'no-email',
         amount: val,
         network,
         walletAddress: address,
@@ -998,22 +1257,70 @@ const WithdrawalPage = ({ profile, onSuccess }: { profile: UserProfile | null, o
         createdAt: serverTimestamp()
       });
       
-      await updateDoc(doc(db, 'users', profile.uid), {
+      batch.update(doc(db, 'users', user.uid), {
         balance: increment(-val)
       });
 
-      onSuccess();
-      setAmount('');
-      setAddress('');
+      await batch.commit();
+
+      setWithdrawalStatus('submitted');
+      setTimeout(() => {
+        setWithdrawalStatus('idle');
+        if (onSuccess) onSuccess();
+      }, 1500);
     } catch (err: any) {
-      handleFirestoreError(err, OperationType.WRITE, 'withdrawals');
+      setWithdrawalStatus('idle');
+      console.error("Withdrawal error:", err);
+      let errMsg = err.message || 'Unknown error';
+      if (errMsg.includes('permission-denied')) {
+        errMsg = "Insufficient funds or access denied. Please check your balance.";
+      }
+      alert('Withdrawal Failed: ' + errMsg);
+      try {
+        handleFirestoreError(err, OperationType.WRITE, 'withdrawals');
+      } catch (e) {}
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="space-y-6">
+    <div className="relative space-y-6">
+      <AnimatePresence>
+        {withdrawalStatus !== 'idle' && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              className="bg-white rounded-3xl p-8 max-w-sm w-full text-center shadow-2xl"
+            >
+              <div className="flex justify-center mb-6">
+                {withdrawalStatus === 'processing' ? (
+                  <div className="w-16 h-16 border-4 border-indigo-100 border-t-indigo-600 rounded-full animate-spin" />
+                ) : (
+                  <div className="w-16 h-16 bg-green-50 rounded-full flex items-center justify-center">
+                    <CheckCircle2 className="w-10 h-10 text-green-600" />
+                  </div>
+                )}
+              </div>
+              <h3 className="text-xl font-black text-gray-900 mb-2">
+                {withdrawalStatus === 'processing' ? 'Withdrawal Processing' : 'Withdrawal Successful'}
+              </h3>
+              <p className="text-sm text-gray-500 leading-relaxed">
+                {withdrawalStatus === 'processing' 
+                  ? 'We are processing your withdrawal request. Please wait...' 
+                  : 'Your withdrawal request has been submitted and is pending approval.'}
+              </p>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <h2 className="text-2xl font-bold text-gray-900">Withdraw USDT</h2>
       <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
         <div className="flex justify-between items-center mb-6">
@@ -1040,6 +1347,7 @@ const WithdrawalPage = ({ profile, onSuccess }: { profile: UserProfile | null, o
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Amount to Withdraw</label>
             <input 
+              id="withdraw-amount-input"
               type="number" 
               required
               value={amount}
@@ -1055,6 +1363,7 @@ const WithdrawalPage = ({ profile, onSuccess }: { profile: UserProfile | null, o
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">{network} Wallet Address</label>
             <input 
+              id="withdraw-wallet-address-input"
               type="text" 
               required
               value={address}
@@ -1064,6 +1373,7 @@ const WithdrawalPage = ({ profile, onSuccess }: { profile: UserProfile | null, o
             />
           </div>
           <button 
+            id="submit-withdrawal-btn"
             type="submit" 
             disabled={loading || !amount || !address}
             className="w-full bg-indigo-600 text-white py-3 rounded-xl font-bold hover:bg-indigo-700 transition-colors disabled:opacity-50 shadow-lg shadow-indigo-200"
@@ -1082,12 +1392,16 @@ interface Referral {
   referredUid: string;
   referredEmail: string;
   isActiveInvestor?: boolean;
+  commissionEarned?: number;
   createdAt: any;
 }
 
 const TeamPage = ({ profile }: { profile: UserProfile | null }) => {
   const [referrals, setReferrals] = useState<Referral[]>([]);
   const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState<'registered' | 'active'>('registered');
+  const [copied, setCopied] = useState(false);
+  const [linkCopied, setLinkCopied] = useState(false);
 
   useEffect(() => {
     if (!profile) return;
@@ -1101,52 +1415,195 @@ const TeamPage = ({ profile }: { profile: UserProfile | null }) => {
     return () => unsubscribe();
   }, [profile]);
 
-  const registeredCount = referrals.length;
-  const activeInvestorCount = referrals.filter(r => r.isActiveInvestor).length;
+  const registeredUsers = referrals; // All invited users are registered
+  const activeInvestors = referrals.filter(r => r.isActiveInvestor);
   const totalCommissions = profile?.totalCommissionsEarned || 0;
+
+  // Generate a robust referral link that works in both dev and preview environments
+  const getReferralLink = () => {
+    const baseUrl = window.location.href.split('#')[0].split('?')[0];
+    // Ensure baseUrl ends with / if it doesn't end with a filename or /
+    const cleanBase = baseUrl.endsWith('.html') || baseUrl.endsWith('/') ? baseUrl : baseUrl + '/';
+    return `${cleanBase}#/login?ref=${profile?.referralCode}`;
+  };
+  const referralLink = getReferralLink();
 
   return (
     <div className="space-y-6">
       <h2 className="text-2xl font-bold text-gray-900">My Team</h2>
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
-          <p className="text-xs text-gray-400 font-bold uppercase mb-1 tracking-wider">Registered Users</p>
-          <p className="text-3xl font-black text-indigo-600">{registeredCount}</p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="bg-gradient-to-br from-indigo-600 to-indigo-700 p-6 rounded-3xl shadow-xl shadow-indigo-100 text-white">
+          <p className="text-indigo-100 text-xs font-bold uppercase tracking-wider mb-1">Total Team Size</p>
+          <p className="text-4xl font-black mb-4">{referrals.length}</p>
+          <div className="flex justify-between text-xs font-medium text-indigo-100 bg-white/10 p-3 rounded-xl">
+            <span>Registered: {registeredUsers.length}</span>
+            <span>Active: {activeInvestors.length}</span>
+          </div>
         </div>
-        <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
-          <p className="text-xs text-gray-400 font-bold uppercase mb-1 tracking-wider">Active Investors</p>
-          <p className="text-3xl font-black text-green-600">{activeInvestorCount}</p>
-        </div>
-        <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
-          <p className="text-xs text-gray-400 font-bold uppercase mb-1 tracking-wider">Commissions Earned</p>
-          <p className="text-3xl font-black text-purple-600">${totalCommissions.toFixed(2)}</p>
+        <div className="bg-gradient-to-br from-green-600 to-green-700 p-6 rounded-3xl shadow-xl shadow-green-100 text-white">
+          <p className="text-green-100 text-xs font-bold uppercase tracking-wider mb-1">Earned Commission Balance</p>
+          <p className="text-4xl font-black mb-4">${totalCommissions.toFixed(2)}</p>
+          <div className="flex items-center text-xs font-medium text-green-100 bg-white/10 p-3 rounded-xl">
+            <CheckCircle2 className="w-3 h-3 mr-2" />
+            <span>10% per first-time purchase</span>
+          </div>
         </div>
       </div>
+
+      {/* Referral Link Section */}
+      <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-4">
+        <div className="flex-1 text-left w-full">
+          <div className="flex items-center space-x-2 mb-1">
+            <Link className="w-3 h-3 text-indigo-600" />
+            <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Your Referral Link</p>
+          </div>
+          <div className="bg-indigo-50 p-3 rounded-xl border border-indigo-100 text-indigo-600 text-[10px] sm:text-xs font-mono break-all">
+            https://ais-pre-e3itapjzb6oyqazompsca3-658880038172.asia-southeast1.run.app/#/login
+          </div>
+        </div>
+        <button 
+          onClick={() => {
+            navigator.clipboard.writeText('https://ais-pre-e3itapjzb6oyqazompsca3-658880038172.asia-southeast1.run.app/#/login');
+            setLinkCopied(true);
+            setTimeout(() => setLinkCopied(false), 2000);
+          }}
+          className={`flex items-center space-x-2 px-6 py-4 rounded-2xl font-bold transition-all w-full sm:w-auto justify-center ${linkCopied ? 'bg-green-500 text-white translate-y-[-2px]' : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-lg shadow-indigo-100'}`}
+        >
+          {linkCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+          <span className="text-sm">{linkCopied ? 'Copied' : 'Copy Link'}</span>
+        </button>
+      </div>
       
-      <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 text-center">
-        <p className="text-sm text-gray-500 mb-2">My PIXI STAKING Referral Code</p>
-        <div className="inline-flex items-center space-x-3 bg-amber-50 px-6 py-3 rounded-xl border border-amber-100">
-          <span className="text-2xl font-black text-amber-600 tracking-widest">{profile?.referralCode}</span>
-          <button onClick={() => {
-            navigator.clipboard.writeText(profile?.referralCode || '');
-            alert('Copied!');
-          }} className="p-2 text-amber-600 hover:bg-amber-100 rounded-lg transition-colors">
-            <Copy className="w-5 h-5" />
+      <div className="bg-white p-8 rounded-[2rem] shadow-sm border border-gray-100 text-center">
+        <p className="text-sm text-gray-500 mb-4 font-medium uppercase tracking-widest">My Referral Code</p>
+        <div className="flex flex-col items-center space-y-5">
+          <div className="flex flex-col sm:flex-row items-center space-y-3 sm:space-y-0 sm:space-x-3 bg-amber-50 p-4 sm:p-2 sm:pl-6 rounded-2xl border border-amber-100 w-full max-w-sm justify-between">
+            <span className="text-2xl font-black text-amber-600 tracking-widest">{profile?.referralCode}</span>
+            <button 
+              onClick={() => {
+                if (profile?.referralCode) {
+                  navigator.clipboard.writeText(profile.referralCode);
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 2000);
+                }
+              }}
+              className={`flex items-center space-x-2 px-6 py-3 rounded-xl font-bold text-sm transition-all duration-300 w-full sm:w-auto justify-center ${copied ? 'bg-green-500 text-white scale-105' : 'bg-amber-600 text-white hover:bg-amber-700 shadow-xl shadow-amber-100'}`}
+            >
+              {copied ? (
+                <>
+                  <Check className="w-4 h-4" />
+                  <span>COPIED!</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="w-4 h-4" />
+                  <span>COPY CODE</span>
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-4">
+        <div className="flex space-x-2 p-1 bg-gray-100 rounded-2xl w-full max-w-sm">
+          <button 
+            onClick={() => setActiveTab('registered')}
+            className={`flex-1 py-3 rounded-xl text-xs font-bold transition-all ${activeTab === 'registered' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+          >
+            Registered Users ({registeredUsers.length})
+          </button>
+          <button 
+            onClick={() => setActiveTab('active')}
+            className={`flex-1 py-3 rounded-xl text-xs font-bold transition-all ${activeTab === 'active' ? 'bg-white text-green-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+          >
+            Active Investors ({activeInvestors.length})
           </button>
         </div>
-        <p className="text-xs text-gray-400 mt-4">Earn 10% commission on every PIXI STAKING purchase from your referrals!</p>
+
+        <div className="min-h-[200px]">
+          {activeTab === 'registered' ? (
+            <div className="space-y-3">
+              {registeredUsers.length === 0 ? (
+                <div className="py-20 text-center bg-gray-50 rounded-3xl border border-dashed border-gray-200">
+                  <p className="text-gray-400">No registered users yet.</p>
+                </div>
+              ) : (
+                registeredUsers.map((ref) => (
+                  <motion.div 
+                    initial={{ opacity: 0, x: -10 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    key={ref.id} 
+                    className="bg-white p-4 rounded-2xl border border-gray-100 flex items-center justify-between"
+                  >
+                    <div className="flex items-center space-x-4">
+                      <div className="w-10 h-10 bg-indigo-50 rounded-xl flex items-center justify-center text-indigo-600 font-bold uppercase">
+                        {ref.referredEmail.charAt(0)}
+                      </div>
+                      <div>
+                        <p className="font-bold text-gray-900">{ref.referredEmail}</p>
+                        <p className="text-[10px] text-gray-400">Joined: {ref.createdAt?.toDate ? ref.createdAt.toDate().toLocaleDateString() : 'Recent'}</p>
+                      </div>
+                    </div>
+                    <span className="px-3 py-1 bg-gray-100 text-gray-400 text-[10px] rounded-full font-bold uppercase tracking-wider">Registered</span>
+                  </motion.div>
+                ))
+              )}
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {activeInvestors.length === 0 ? (
+                <div className="py-20 text-center bg-gray-50 rounded-3xl border border-dashed border-gray-200">
+                  <p className="text-gray-400">No active investors in your team.</p>
+                </div>
+              ) : (
+                activeInvestors.map((ref) => (
+                  <motion.div 
+                    initial={{ opacity: 0, x: 10 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    key={ref.id} 
+                    className="bg-white p-4 rounded-2xl border border-indigo-100 shadow-sm flex items-center justify-between"
+                  >
+                    <div className="flex items-center space-x-4">
+                      <div className="w-10 h-10 bg-green-50 rounded-xl flex items-center justify-center text-green-600 font-bold uppercase">
+                        {ref.referredEmail.charAt(0)}
+                      </div>
+                      <div>
+                        <p className="font-bold text-gray-900">{ref.referredEmail}</p>
+                        <p className="text-[10px] text-green-600 font-medium">Activated: {ref.processedAt?.toDate ? ref.processedAt.toDate().toLocaleDateString() : 'Recent'}</p>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <span className="px-3 py-1 bg-green-100 text-green-600 text-[10px] rounded-full font-bold uppercase tracking-wider">Active</span>
+                      {ref.commissionEarned && (
+                        <p className="text-sm font-black text-green-600 mt-1">+${ref.commissionEarned.toFixed(2)}</p>
+                      )}
+                    </div>
+                  </motion.div>
+                ))
+              )}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
 };
 
-const NotificationsPage = () => {
+const NotificationsPage = ({ user }: { user: FirebaseUser | null }) => {
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const q = query(collection(db, 'notifications'), orderBy('createdAt', 'desc'));
+    if (!user) return;
+    
+    // Query for both user-specific notifications and global updates
+    const q = query(
+      collection(db, 'notifications'), 
+      where('userId', 'in', [user.uid, 'all']),
+      orderBy('createdAt', 'desc')
+    );
     const unsubscribe = onSnapshot(q, (snapshot) => {
       setNotifications(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as any)));
       setLoading(false);
@@ -1154,7 +1611,7 @@ const NotificationsPage = () => {
       handleFirestoreError(err, OperationType.LIST, 'notifications');
     });
     return () => unsubscribe();
-  }, []);
+  }, [user]);
 
   if (loading) {
     return (
@@ -1163,6 +1620,27 @@ const NotificationsPage = () => {
       </div>
     );
   }
+
+  const renderMessage = (message: string) => {
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    const parts = message.split(urlRegex);
+    return parts.map((part, i) => {
+      if (part.match(urlRegex)) {
+        return (
+          <a 
+            key={i} 
+            href={part} 
+            target="_blank" 
+            rel="noopener noreferrer"
+            className="text-amber-600 font-bold hover:underline break-all"
+          >
+            {part}
+          </a>
+        );
+      }
+      return part;
+    });
+  };
 
   return (
     <div className="space-y-6 pb-20">
@@ -1188,7 +1666,9 @@ const NotificationsPage = () => {
                   {notif.createdAt?.seconds ? new Date(notif.createdAt.seconds * 1000).toLocaleDateString() : 'Just now'}
                 </span>
               </div>
-              <p className="text-sm text-gray-600 leading-relaxed">{notif.message}</p>
+              <p className="text-sm text-gray-600 leading-relaxed">
+                {renderMessage(notif.message)}
+              </p>
             </motion.div>
           ))
         ) : (
@@ -1202,21 +1682,24 @@ const NotificationsPage = () => {
   );
 };
 
-const AdminDashboard = () => {
+const AdminDashboard = ({ profile }: { profile: UserProfile | null }) => {
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [deposits, setDeposits] = useState<Deposit[]>([]);
   const [withdrawals, setWithdrawals] = useState<Withdrawal[]>([]);
   const [investments, setInvestments] = useState<Investment[]>([]);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [activeTab, setActiveTab] = useState<'users' | 'deposits' | 'withdrawals' | 'investments' | 'notifications'>('users');
+  const [userSearch, setUserSearch] = useState('');
   const [editingUser, setEditingUser] = useState<UserProfile | null>(null);
   const [newBalance, setNewBalance] = useState('');
   const [adminStatus, setAdminStatus] = useState<{ type: 'success' | 'error', message: string } | null>(null);
+  const [selectedScreenshot, setSelectedScreenshot] = useState<string | null>(null);
 
   // Notifications State
   const [notifTitle, setNotifTitle] = useState('');
   const [notifMessage, setNotifMessage] = useState('');
   const [isPostingNotif, setIsPostingNotif] = useState(false);
+  const [lastSync, setLastSync] = useState<Date | null>(null);
 
   useEffect(() => {
     if (adminStatus) {
@@ -1225,29 +1708,146 @@ const AdminDashboard = () => {
     }
   }, [adminStatus]);
 
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const refreshData = async () => {
+    setIsRefreshing(true);
+    console.log("[Admin] Manual refresh triggered");
+    try {
+      const usersSnap = await getDocs(collection(db, 'users'));
+      setUsers(usersSnap.docs.map(d => ({ uid: d.id, ...d.data() } as any)));
+      
+      const depsSnap = await getDocs(collection(db, 'deposits'));
+      setDeposits(depsSnap.docs.map(d => ({ id: d.id, ...d.data() } as any)));
+      
+      const withsSnap = await getDocs(collection(db, 'withdrawals'));
+      setWithdrawals(withsSnap.docs.map(d => ({ id: d.id, ...d.data() } as any)));
+      
+      const invsSnap = await getDocs(collection(db, 'investments'));
+      setInvestments(invsSnap.docs.map(d => ({ id: d.id, ...d.data() } as any)));
+
+      const notifsSnap = await getDocs(collection(db, 'notifications'));
+      setNotifications(notifsSnap.docs.map(d => ({ id: d.id, ...d.data() } as any)));
+      
+      setAdminStatus({ type: 'success', message: 'Data refreshed' });
+    } catch (err: any) {
+      console.error("[Admin] Refresh error:", err);
+      setAdminStatus({ type: 'error', message: 'Refresh failed' });
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
   useEffect(() => {
+    console.log("[Admin] Mounting AdminDashboard, setting up listeners...");
+
     const unsubUsers = onSnapshot(collection(db, 'users'), (s) => {
-      setUsers(s.docs.map(d => ({ uid: d.id, ...d.data() } as any)));
+      // Sort in memory to avoid missing field issues with firestore query orderBy
+      const sortedUsers = s.docs
+        .map(d => ({ uid: d.id, ...d.data() } as any))
+        .sort((a, b) => {
+          const dateA = a.createdAt?.toMillis?.() || a.createdAt?.seconds * 1000 || 0;
+          const dateB = b.createdAt?.toMillis?.() || b.createdAt?.seconds * 1000 || 0;
+          return dateB - dateA;
+        });
+      console.log(`[Admin] Loaded ${sortedUsers.length} users`);
+      setUsers(sortedUsers);
     }, (err) => {
       handleFirestoreError(err, OperationType.LIST, 'admin_users');
     });
-    const unsubDeps = onSnapshot(query(collection(db, 'deposits'), orderBy('createdAt', 'desc')), (s) => {
-      setDeposits(s.docs.map(d => ({ id: d.id, ...d.data() } as any)));
+    const unsubDeps = onSnapshot(collection(db, 'deposits'), (s) => {
+      console.log(`[Admin] onSnapshot received ${s.docs.length} raw docs from deposits`);
+      const sortedDeps = s.docs
+        .map(d => ({ id: d.id, ...d.data() } as any))
+        .filter(d => !d.isInternalSeed) // Hide seed documents
+        .sort((a, b) => {
+          // Use Date.now() + far future for null/pending server timestamps so they stay at the top
+          const nowPlusFuture = Date.now() + 1000000;
+          const dateA = a.createdAt?.toMillis?.() || a.createdAt?.seconds * 1000 || nowPlusFuture;
+          const dateB = b.createdAt?.toMillis?.() || b.createdAt?.seconds * 1000 || nowPlusFuture;
+          return dateB - dateA;
+        });
+      console.log(`[Admin] Loaded ${sortedDeps.length} deposits`);
+      setDeposits(sortedDeps);
+      setLastSync(new Date());
     }, (err) => {
+      console.error("[Admin] Deposits listener error:", err);
       handleFirestoreError(err, OperationType.LIST, 'admin_deposits');
     });
-    const unsubWiths = onSnapshot(query(collection(db, 'withdrawals'), orderBy('createdAt', 'desc')), (s) => {
-      setWithdrawals(s.docs.map(d => ({ id: d.id, ...d.data() } as any)));
+
+    // --- NEW: System Initialization Check ---
+    const initSystem = async () => {
+      try {
+        const qD = query(collection(db, 'deposits'), limit(1));
+        const sD = await getDocs(qD);
+        if (sD.empty) {
+          console.log("[Admin] Initializing 'deposits' collection...");
+          await addDoc(collection(db, 'deposits'), {
+            userId: 'system-init',
+            userEmail: 'system@pixi.com',
+            amount: 0,
+            network: 'BEP20',
+            screenshotUrl: 'https://placehold.co/600x400?text=System+Initialization',
+            status: 'approved',
+            isInternalSeed: true,
+            createdAt: serverTimestamp()
+          });
+        }
+
+        const qW = query(collection(db, 'withdrawals'), limit(1));
+        const sW = await getDocs(qW);
+        if (sW.empty) {
+          console.log("[Admin] Initializing 'withdrawals' collection...");
+          await addDoc(collection(db, 'withdrawals'), {
+            userId: 'system-init',
+            userEmail: 'system@pixi.com',
+            amount: 0,
+            network: 'BEP20',
+            walletAddress: 'SYSTEM_INIT',
+            status: 'approved',
+            isInternalSeed: true,
+            createdAt: serverTimestamp()
+          });
+        }
+      } catch (e) {
+        console.warn("[Admin] System initialization skip/fail:", e);
+      }
+    };
+    initSystem();
+    const unsubWiths = onSnapshot(collection(db, 'withdrawals'), (s) => {
+      const sortedWiths = s.docs
+        .map(d => ({ id: d.id, ...d.data() } as any))
+        .filter(d => !d.isInternalSeed) // Hide seed documents
+        .sort((a, b) => {
+          const dateA = a.createdAt?.toMillis?.() || a.createdAt?.seconds * 1000 || Date.now();
+          const dateB = b.createdAt?.toMillis?.() || b.createdAt?.seconds * 1000 || Date.now();
+          return dateB - dateA;
+        });
+      setWithdrawals(sortedWiths);
     }, (err) => {
       handleFirestoreError(err, OperationType.LIST, 'admin_withdrawals');
     });
-    const unsubInvs = onSnapshot(query(collection(db, 'investments'), orderBy('startDate', 'desc')), (s) => {
-      setInvestments(s.docs.map(d => ({ id: d.id, ...d.data() } as any)));
+    const unsubInvs = onSnapshot(collection(db, 'investments'), (s) => {
+      const sortedInvs = s.docs
+        .map(d => ({ id: d.id, ...d.data() } as any))
+        .sort((a, b) => {
+          const dateA = a.startDate?.toMillis?.() || a.startDate?.seconds * 1000 || Date.now();
+          const dateB = b.startDate?.toMillis?.() || b.startDate?.seconds * 1000 || Date.now();
+          return dateB - dateA;
+        });
+      setInvestments(sortedInvs);
     }, (err) => {
       handleFirestoreError(err, OperationType.LIST, 'admin_investments');
     });
-    const unsubNotifs = onSnapshot(query(collection(db, 'notifications'), orderBy('createdAt', 'desc')), (s) => {
-      setNotifications(s.docs.map(d => ({ id: d.id, ...d.data() } as any)));
+    const unsubNotifs = onSnapshot(collection(db, 'notifications'), (s) => {
+      const sortedNotifs = s.docs
+        .map(d => ({ id: d.id, ...d.data() } as any))
+        .sort((a, b) => {
+          const dateA = a.createdAt?.toMillis?.() || a.createdAt?.seconds * 1000 || Date.now();
+          const dateB = b.createdAt?.toMillis?.() || b.createdAt?.seconds * 1000 || Date.now();
+          return dateB - dateA;
+        });
+      setNotifications(sortedNotifs);
     }, (err) => {
       handleFirestoreError(err, OperationType.LIST, 'admin_notifications');
     });
@@ -1260,6 +1860,7 @@ const AdminDashboard = () => {
     setIsPostingNotif(true);
     try {
       await addDoc(collection(db, 'notifications'), {
+        userId: 'all',
         title: notifTitle,
         message: notifMessage,
         createdAt: serverTimestamp()
@@ -1284,31 +1885,112 @@ const AdminDashboard = () => {
   };
 
   const handleApproveDeposit = async (dep: Deposit) => {
+    if (dep.status !== 'pending') {
+      setAdminStatus({ type: 'error', message: 'Deposit is already processed' });
+      return;
+    }
+
     try {
+      // Ensure we have a valid amount
+      const amountToCredit = Number(dep.amount);
+      if (isNaN(amountToCredit) || amountToCredit <= 0) {
+        setAdminStatus({ type: 'error', message: 'Invalid deposit amount' });
+        return;
+      }
+
+      // 1. Fetch user document to verify existence
       const userRef = doc(db, 'users', dep.userId);
       const userSnap = await getDoc(userRef);
-      if (userSnap.exists()) {
-        await updateDoc(userRef, { balance: increment(dep.amount) });
-        await updateDoc(doc(db, 'deposits', dep.id), { status: 'approved' });
-        setAdminStatus({ type: 'success', message: 'Deposit approved and balance updated' });
+
+      if (!userSnap.exists()) {
+        setAdminStatus({ type: 'error', message: 'User document not found. Cannot credit balance.' });
+        return;
       }
+
+      const batch = writeBatch(db);
+      
+      // Update user balance
+      batch.update(userRef, { 
+        balance: increment(amountToCredit) 
+      });
+
+      // Update deposit status
+      const depRef = doc(db, 'deposits', dep.id);
+      batch.update(depRef, { 
+        status: 'approved',
+        processedAt: serverTimestamp()
+      });
+
+      // Send notification to user
+      const notifRef = doc(collection(db, 'notifications'));
+      batch.set(notifRef, {
+        userId: dep.userId,
+        title: 'Deposit Approved ✅',
+        message: `Your deposit of ${amountToCredit} USDT has been approved and credited to your balance.`,
+        createdAt: serverTimestamp()
+      });
+
+      await batch.commit();
+      setAdminStatus({ type: 'success', message: 'Deposit approved and balance updated' });
     } catch (err: any) { 
-      setAdminStatus({ type: 'error', message: 'Failed to approve deposit' });
+      console.error("Approve Deposit Error:", err);
+      const errorMessage = err.message || 'Failed to approve deposit';
+      setAdminStatus({ type: 'error', message: errorMessage });
       handleFirestoreError(err, OperationType.WRITE, `approve_deposit_${dep.id}`); 
     }
   };
 
-  const handleRejectDeposit = async (id: string) => {
+  const handleRejectDeposit = async (dep: Deposit) => {
+    if (dep.status !== 'pending') {
+      setAdminStatus({ type: 'error', message: 'Deposit is already processed' });
+      return;
+    }
     try {
-      await updateDoc(doc(db, 'deposits', id), { status: 'rejected' });
+      const batch = writeBatch(db);
+      batch.update(doc(db, 'deposits', dep.id), { 
+        status: 'rejected',
+        processedAt: serverTimestamp()
+      });
+
+      // Send notification to user
+      const notifRef = doc(collection(db, 'notifications'));
+      batch.set(notifRef, {
+        userId: dep.userId,
+        title: 'Deposit Rejected ❌',
+        message: `Your deposit of ${dep.amount} USDT was rejected. Please contact support or check your transaction details.`,
+        createdAt: serverTimestamp()
+      });
+
+      await batch.commit();
+      setAdminStatus({ type: 'success', message: 'Deposit rejected' });
     } catch (err: any) {
-      handleFirestoreError(err, OperationType.WRITE, `reject_deposit_${id}`);
+      setAdminStatus({ type: 'error', message: 'Failed to reject deposit' });
+      handleFirestoreError(err, OperationType.WRITE, `reject_deposit_${dep.id}`);
     }
   };
 
   const handleApproveWithdrawal = async (withd: Withdrawal) => {
+    if (withd.status !== 'pending') {
+      setAdminStatus({ type: 'error', message: 'Withdrawal is already processed' });
+      return;
+    }
     try {
-      await updateDoc(doc(db, 'withdrawals', withd.id), { status: 'approved' });
+      const batch = writeBatch(db);
+      batch.update(doc(db, 'withdrawals', withd.id), { 
+        status: 'approved',
+        processedAt: serverTimestamp()
+      });
+
+      // Send notification to user
+      const notifRef = doc(collection(db, 'notifications'));
+      batch.set(notifRef, {
+        userId: withd.userId,
+        title: 'Withdrawal Approved ✅',
+        message: `Your withdrawal of ${withd.amount} USDT has been approved and processed.`,
+        createdAt: serverTimestamp()
+      });
+
+      await batch.commit();
       setAdminStatus({ type: 'success', message: 'Withdrawal approved' });
     } catch (err: any) {
       setAdminStatus({ type: 'error', message: 'Failed to approve withdrawal' });
@@ -1317,72 +1999,35 @@ const AdminDashboard = () => {
   };
 
   const handleRejectWithdrawal = async (withd: Withdrawal) => {
+    if (withd.status !== 'pending') {
+      setAdminStatus({ type: 'error', message: 'Withdrawal is already processed' });
+      return;
+    }
     try {
-      const userRef = doc(db, 'users', withd.userId);
-      const userSnap = await getDoc(userRef);
-      if (userSnap.exists()) {
-        await updateDoc(userRef, { balance: increment(withd.amount) });
-        await updateDoc(doc(db, 'withdrawals', withd.id), { status: 'rejected' });
-        setAdminStatus({ type: 'success', message: 'Withdrawal rejected and balance refunded' });
-      }
+      const batch = writeBatch(db);
+      const refundAmount = Number(withd.amount);
+      batch.update(doc(db, 'users', withd.userId), { 
+        balance: increment(refundAmount) 
+      });
+      batch.update(doc(db, 'withdrawals', withd.id), { 
+        status: 'rejected',
+        processedAt: serverTimestamp()
+      });
+
+      // Send notification to user
+      const notifRef = doc(collection(db, 'notifications'));
+      batch.set(notifRef, {
+        userId: withd.userId,
+        title: 'Withdrawal Rejected ❌',
+        message: `Your withdrawal of ${withd.amount} USDT was rejected and funds were refunded to your balance.`,
+        createdAt: serverTimestamp()
+      });
+
+      await batch.commit();
+      setAdminStatus({ type: 'success', message: 'Withdrawal rejected and balance refunded' });
     } catch (err: any) {
       setAdminStatus({ type: 'error', message: 'Failed to reject withdrawal' });
       handleFirestoreError(err, OperationType.WRITE, `reject_withdrawal_${withd.id}`);
-    }
-  };
-
-  const handleApproveInvestment = async (inv: Investment) => {
-    try {
-      // 1. Set investment to active
-      await updateDoc(doc(db, 'investments', inv.id), { status: 'active' });
-
-      // 2. Handle Referral Commission (10%)
-      const userRef = doc(db, 'users', inv.userId);
-      const userSnap = await getDoc(userRef);
-      
-      if (userSnap.exists()) {
-        const userData = userSnap.data() as UserProfile;
-        
-        // 3. Update Referral record to active investor
-        const refQuery = query(collection(db, 'referrals'), where('referredUid', '==', inv.userId));
-        const refSnap = await getDocs(refQuery);
-        if (!refSnap.empty) {
-          await updateDoc(doc(db, 'referrals', refSnap.docs[0].id), { isActiveInvestor: true });
-        }
-
-        if (userData.referredBy) {
-          const q = query(collection(db, 'users'), where('referralCode', '==', userData.referredBy));
-          const referrerSnap = await getDocs(q);
-          
-          if (!referrerSnap.empty) {
-            const referrerDoc = referrerSnap.docs[0];
-            const commission = inv.amount * 0.10;
-            await updateDoc(doc(db, 'users', referrerDoc.id), {
-              balance: increment(commission),
-              totalCommissionsEarned: increment(commission)
-            });
-          }
-        }
-      }
-      setAdminStatus({ type: 'success', message: 'Investment approved and referral commission processed' });
-    } catch (err: any) {
-      setAdminStatus({ type: 'error', message: 'Failed to approve investment' });
-      handleFirestoreError(err, OperationType.WRITE, `approve_investment_${inv.id}`);
-    }
-  };
-
-  const handleRejectInvestment = async (inv: Investment) => {
-    try {
-      const userRef = doc(db, 'users', inv.userId);
-      const userSnap = await getDoc(userRef);
-      if (userSnap.exists()) {
-        await updateDoc(userRef, { balance: increment(inv.amount) });
-        await updateDoc(doc(db, 'investments', inv.id), { status: 'rejected' });
-        setAdminStatus({ type: 'success', message: 'Investment rejected and balance refunded' });
-      }
-    } catch (err: any) {
-      setAdminStatus({ type: 'error', message: 'Failed to reject investment' });
-      handleFirestoreError(err, OperationType.WRITE, `reject_investment_${inv.id}`);
     }
   };
 
@@ -1446,6 +2091,16 @@ const AdminDashboard = () => {
     }
   };
 
+  const handleDeleteInvestment = async (id: string) => {
+    try {
+      await deleteDoc(doc(db, 'investments', id));
+      setAdminStatus({ type: 'success', message: 'Investment deleted' });
+    } catch (err: any) {
+      setAdminStatus({ type: 'error', message: 'Failed to delete investment' });
+      handleFirestoreError(err, OperationType.DELETE, `investments/${id}`);
+    }
+  };
+
   const handleUpdateBalance = async () => {
     if (!editingUser) return;
     try {
@@ -1460,9 +2115,28 @@ const AdminDashboard = () => {
 
   return (
     <div className="space-y-6 pb-20">
-      <h2 className="text-2xl font-bold text-gray-900">Admin Dashboard</h2>
-
-      <AdminPayoutProcessor investments={investments} onPayoutSuccess={() => {}} />
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+          <div className="flex items-center space-x-3 mb-1">
+            <h2 className="text-3xl font-black text-gray-900 tracking-tight uppercase">Admin Console</h2>
+            <div className="flex items-center space-x-1.5 px-2 py-0.5 bg-green-50 rounded-full border border-green-100">
+              <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" />
+              <span className="text-[10px] font-bold text-green-600 uppercase tracking-wider">
+                Live: {deposits.length} Deposits {lastSync && `(Last Sync: ${lastSync.toLocaleTimeString()})`}
+              </span>
+            </div>
+          </div>
+          <p className="text-gray-500 font-medium">Monitoring PIXI Ecosystem in Real-time</p>
+        </div>
+        <button 
+          onClick={refreshData}
+          disabled={isRefreshing}
+          className="flex items-center space-x-2 px-4 py-2 bg-gray-100 text-gray-600 rounded-xl font-bold text-sm hover:bg-gray-200 transition-all active:scale-[0.98] disabled:opacity-50"
+        >
+          <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
+          <span>{isRefreshing ? 'Refreshing...' : 'Refresh Data'}</span>
+        </button>
+      </div>
 
       <AnimatePresence>
         {adminStatus && (
@@ -1480,10 +2154,14 @@ const AdminDashboard = () => {
         )}
       </AnimatePresence>
       
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
         <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100">
           <p className="text-xs text-gray-500 font-bold uppercase">Total Users</p>
           <p className="text-2xl font-black text-gray-900">{users.length}</p>
+        </div>
+        <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100">
+          <p className="text-xs text-gray-500 font-bold uppercase">Active Inv</p>
+          <p className="text-2xl font-black text-green-600">{users.filter(u => u.isActiveInvestor).length}</p>
         </div>
         <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100">
           <p className="text-xs text-gray-500 font-bold uppercase">Pending Dep</p>
@@ -1499,81 +2177,148 @@ const AdminDashboard = () => {
         </div>
       </div>
 
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="bg-indigo-600 p-6 rounded-2xl shadow-xl text-white">
+          <div className="flex items-center justify-between mb-4">
+            <Download className="w-6 h-6 opacity-60" />
+            <span className="text-[10px] font-bold uppercase tracking-widest bg-white/20 px-2 py-1 rounded">Total Deposits</span>
+          </div>
+          <p className="text-3xl font-black">
+            ${deposits.filter(d => d.status === 'approved').reduce((acc, curr) => acc + curr.amount, 0).toFixed(2)}
+          </p>
+          <p className="text-[10px] mt-2 opacity-60 font-bold">Approved transaction volume</p>
+        </div>
+        
+        <div className="bg-red-600 p-6 rounded-2xl shadow-xl text-white">
+          <div className="flex items-center justify-between mb-4">
+            <Upload className="w-6 h-6 opacity-60" />
+            <span className="text-[10px] font-bold uppercase tracking-widest bg-white/20 px-2 py-1 rounded">Total Withdrawals</span>
+          </div>
+          <p className="text-3xl font-black">
+            ${withdrawals.filter(w => w.status === 'approved').reduce((acc, curr) => acc + curr.amount, 0).toFixed(2)}
+          </p>
+          <p className="text-[10px] mt-2 opacity-60 font-bold">Processed withdrawals</p>
+        </div>
+
+        <div className="bg-amber-600 p-6 rounded-2xl shadow-xl text-white">
+          <div className="flex items-center justify-between mb-4">
+            <TrendingUp className="w-6 h-6 opacity-60" />
+            <span className="text-[10px] font-bold uppercase tracking-widest bg-white/20 px-2 py-1 rounded">Invested Capital</span>
+          </div>
+          <p className="text-3xl font-black">
+            ${investments.filter(i => i.status === 'active').reduce((acc, curr) => acc + curr.amount, 0).toFixed(2)}
+          </p>
+          <p className="text-[10px] mt-2 opacity-60 font-bold">Active staking volume</p>
+        </div>
+      </div>
+
       <div className="flex bg-gray-100 p-1 rounded-xl overflow-x-auto no-scrollbar">
-        {(['users', 'deposits', 'withdrawals', 'investments', 'notifications'] as const).map((tab) => (
-          <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={`flex-1 min-w-[80px] py-2 text-sm font-bold rounded-lg transition-all ${
-              activeTab === tab ? 'bg-white text-amber-600 shadow-sm' : 'text-gray-500'
-            }`}
-          >
-            {tab.charAt(0).toUpperCase() + tab.slice(1)}
-          </button>
-        ))}
+        {(['users', 'deposits', 'withdrawals', 'investments', 'notifications'] as const).map((tab) => {
+          let count = 0;
+          if (tab === 'users') count = users.length;
+          if (tab === 'deposits') count = deposits.filter(d => d.status === 'pending').length;
+          if (tab === 'withdrawals') count = withdrawals.filter(w => w.status === 'pending').length;
+          if (tab === 'investments') count = investments.filter(i => i.status === 'active').length;
+          
+          return (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`flex-1 min-w-[100px] py-2 text-sm font-bold rounded-lg transition-all flex items-center justify-center space-x-1 ${
+                activeTab === tab ? 'bg-white text-amber-600 shadow-sm' : 'text-gray-500'
+              }`}
+            >
+              <span>{tab.charAt(0).toUpperCase() + tab.slice(1)}</span>
+              {count > 0 && (
+                <span className={`px-1.5 py-0.5 rounded-full text-[10px] ${activeTab === tab ? 'bg-amber-100' : 'bg-gray-200'}`}>
+                  {count}
+                </span>
+              )}
+            </button>
+          );
+        })}
       </div>
 
       <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
         {activeTab === 'users' && (
           <div className="divide-y divide-gray-50">
-            {users.map(u => (
+            <div className="p-4 bg-gray-50/50">
+              <input 
+                type="text" 
+                placeholder="Search users by email or code..." 
+                value={userSearch}
+                onChange={e => setUserSearch(e.target.value)}
+                className="w-full px-4 py-2 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-amber-500 bg-white"
+              />
+            </div>
+            {users.filter(u => {
+              if (!u.email) return false;
+              const search = userSearch.toLowerCase();
+              return (
+                u.email.toLowerCase().includes(search) || 
+                (u.referralCode?.toLowerCase().includes(search))
+              );
+            }).map(u => (
               <div key={u.uid} className="p-4 space-y-3">
                 <div className="flex justify-between items-center">
                   <div>
                     <p className="text-sm font-bold text-gray-900">{u.email}</p>
                     <p className="text-xs text-gray-500">Balance: ${u.balance.toFixed(2)}</p>
-                    <div className="flex items-center mt-1">
+                    <div className="flex items-center mt-1 space-x-2">
                       <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase ${
                         u.status === 'active' ? 'bg-green-100 text-green-600' : 
                         u.status === 'banned' ? 'bg-red-100 text-red-600' : 'bg-orange-100 text-orange-600'
                       }`}>
                         {u.status || 'active'}
                       </span>
-                      {u.role === 'admin' && <span className="ml-2 text-[10px] font-bold bg-purple-100 text-purple-600 px-2 py-0.5 rounded uppercase">Admin</span>}
+                      {u.isActiveInvestor && (
+                        <span className="text-[10px] font-bold bg-indigo-100 text-indigo-600 px-2 py-0.5 rounded uppercase flex items-center">
+                          <CheckCircle2 className="w-2.5 h-2.5 mr-1" />
+                          Investor
+                        </span>
+                      )}
+                      {u.role === 'admin' && <span className="text-[10px] font-bold bg-purple-100 text-purple-600 px-2 py-0.5 rounded uppercase">Admin</span>}
                     </div>
                   </div>
-                  <button 
-                    onClick={() => { setEditingUser(u); setNewBalance(u.balance.toString()); }}
-                    className="text-xs bg-amber-50 text-amber-600 px-3 py-1 rounded-lg font-bold"
-                  >
-                    Edit Balance
-                  </button>
-                </div>
-                
-                {u.role !== 'admin' && (
-                  <div className="flex space-x-2">
-                    {u.status !== 'active' && (
-                      <button 
-                        onClick={() => handleUpdateUserStatus(u.uid, 'active')}
-                        className="flex-1 py-1.5 text-[10px] font-bold bg-green-50 text-green-600 rounded border border-green-100"
-                      >
-                        Activate
-                      </button>
-                    )}
-                    {u.status !== 'paused' && (
-                      <button 
-                        onClick={() => handleUpdateUserStatus(u.uid, 'paused')}
-                        className="flex-1 py-1.5 text-[10px] font-bold bg-orange-50 text-orange-600 rounded border border-orange-100"
-                      >
-                        Pause
-                      </button>
-                    )}
-                    {u.status !== 'banned' && (
-                      <button 
-                        onClick={() => handleUpdateUserStatus(u.uid, 'banned')}
-                        className="flex-1 py-1.5 text-[10px] font-bold bg-red-50 text-red-600 rounded border border-red-100"
-                      >
-                        Ban
-                      </button>
-                    )}
+                  <div className="flex flex-wrap gap-2">
                     <button 
-                      onClick={() => setDeletingUserId(u.uid)}
-                      className="flex-1 py-1.5 text-[10px] font-bold bg-gray-50 text-gray-600 rounded border border-gray-100"
+                      onClick={() => { setEditingUser(u); setNewBalance(u.balance.toString()); }}
+                      className="text-[10px] bg-amber-50 text-amber-600 px-3 py-1.5 rounded-lg font-bold border border-amber-100 hover:bg-amber-100 transition-colors"
                     >
-                      Delete
+                      Edit Balance
                     </button>
+                    {u.role !== 'admin' && (
+                      <>
+                        <button 
+                          onClick={() => handleUpdateUserStatus(u.uid, u.status === 'banned' ? 'active' : 'banned')}
+                          className={`text-[10px] px-3 py-1.5 rounded-lg font-bold border transition-colors ${
+                            u.status === 'banned' 
+                              ? 'bg-green-50 text-green-600 border-green-100 hover:bg-green-100' 
+                              : 'bg-orange-50 text-orange-600 border-orange-100 hover:bg-orange-100'
+                          }`}
+                        >
+                          {u.status === 'banned' ? 'Unban User' : 'Ban User'}
+                        </button>
+                        <button 
+                          onClick={() => handleUpdateUserStatus(u.uid, u.status === 'paused' ? 'active' : 'paused')}
+                          className={`text-[10px] px-3 py-1.5 rounded-lg font-bold border transition-colors ${
+                            u.status === 'paused' 
+                              ? 'bg-green-50 text-green-600 border-green-100 hover:bg-green-100' 
+                              : 'bg-gray-50 text-gray-600 border-gray-100 hover:bg-gray-100'
+                          }`}
+                        >
+                          {u.status === 'paused' ? 'Resume' : 'Pause'}
+                        </button>
+                        <button 
+                          onClick={() => setDeletingUserId(u.uid)}
+                          className="text-[10px] bg-red-50 text-red-600 px-3 py-1.5 rounded-lg font-bold border border-red-100 hover:bg-red-100 transition-colors"
+                        >
+                          Delete
+                        </button>
+                      </>
+                    )}
                   </div>
-                )}
+                </div>
               </div>
             ))}
           </div>
@@ -1626,36 +2371,85 @@ const AdminDashboard = () => {
         </AnimatePresence>
 
         {activeTab === 'deposits' && (
-          <div className="divide-y divide-gray-50">
-            {deposits.map(d => (
-              <div key={d.id} className="p-4 space-y-3">
-                <div className="flex justify-between items-start">
-                  <div>
-                    <p className="text-sm font-bold text-gray-900">{d.userEmail}</p>
-                    <p className="text-lg font-black text-amber-600">${d.amount} USDT</p>
-                  </div>
-                  <span className={`text-[10px] font-bold px-2 py-1 rounded uppercase ${
-                    d.status === 'pending' ? 'bg-orange-100 text-orange-600' : 
-                    d.status === 'approved' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'
-                  }`}>
-                    {d.status}
-                  </span>
+          <div className="space-y-4">
+            <div className="flex justify-between items-center px-4 pt-2">
+              <h3 className="text-sm font-bold text-gray-500 uppercase flex items-center">
+                <Clock className="w-3 h-3 mr-2 text-orange-500" />
+                Pending Review: {deposits.filter(d => d.status === 'pending').length}
+              </h3>
+              <button 
+                onClick={refreshData}
+                className="text-[10px] font-bold text-indigo-600 hover:underline flex items-center"
+              >
+                <RefreshCw className={`w-3 h-3 mr-1 ${isRefreshing ? 'animate-spin' : ''}`} />
+                Sync Now
+              </button>
+            </div>
+            <div className="divide-y divide-gray-50">
+              {deposits.length === 0 ? (
+                <div className="p-12 text-center text-gray-400">
+                  <Clock className="w-12 h-12 mx-auto mb-4 opacity-20" />
+                  <p className="font-bold">No deposits found</p>
                 </div>
-                <img src={d.screenshotUrl} alt="Proof" className="w-full max-h-64 object-contain bg-gray-50 rounded-lg border border-gray-100" />
-                {d.status === 'pending' && (
-                  <div className="flex space-x-2">
-                    <button onClick={() => handleApproveDeposit(d)} className="flex-1 bg-green-600 text-white py-2 rounded-lg font-bold text-sm">Approve</button>
-                    <button onClick={() => handleRejectDeposit(d.id)} className="flex-1 bg-red-600 text-white py-2 rounded-lg font-bold text-sm">Reject</button>
+              ) : deposits.map(d => (
+                <div key={d.id} className={`p-4 space-y-3 transition-all ${d.status === 'pending' ? 'bg-orange-50/30' : ''}`}>
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <p className="text-sm font-bold text-gray-900">{d.userEmail}</p>
+                      <div className="flex items-center space-x-2">
+                        <p className="text-xl font-black text-amber-600">${d.amount} USDT</p>
+                        {d.status === 'pending' && <span className="animate-pulse w-2 h-2 bg-orange-500 rounded-full" />}
+                      </div>
+                      <div className="flex flex-wrap gap-1 mt-1">
+                        {d.network && <span className="px-2 py-0.5 bg-indigo-50 text-indigo-600 rounded text-[10px] font-bold uppercase">{d.network}</span>}
+                        <span className="px-2 py-0.5 bg-gray-100 text-gray-500 rounded text-[10px] font-mono">ID: {d.id}</span>
+                      </div>
+                    </div>
+                    <span className={`text-[10px] font-bold px-2 py-1 rounded-full uppercase border ${
+                      d.status === 'pending' ? 'bg-orange-100 text-orange-600 border-orange-200' : 
+                      d.status === 'approved' ? 'bg-green-100 text-green-600 border-green-200' : 'bg-red-100 text-red-600 border-red-200'
+                    }`}>
+                      {d.status}
+                    </span>
                   </div>
-                )}
-              </div>
-            ))}
+                  {d.screenshotUrl ? (
+                    <div className="relative group">
+                      <img src={d.screenshotUrl} alt="Proof" className="w-full max-h-64 object-contain bg-gray-50 rounded-lg border border-gray-100 transition-transform cursor-pointer" 
+                        onClick={() => setSelectedScreenshot(d.screenshotUrl)}
+                      />
+                      <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                         <span className="bg-black/50 text-white text-[10px] px-2 py-1 rounded backdrop-blur-sm">Click to expand</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="w-full h-32 bg-gray-50 rounded-lg flex items-center justify-center border border-dashed border-gray-200">
+                      <p className="text-xs text-gray-400">No screenshot provided</p>
+                    </div>
+                  )}
+                  {d.status === 'pending' && (
+                    <div className="flex space-x-2 pt-2">
+                      <button onClick={() => handleApproveDeposit(d)} className="flex-1 bg-green-600 hover:bg-green-700 text-white py-3 rounded-xl font-bold text-sm shadow-sm transition-all active:scale-[0.98]">
+                        Approve Deposit
+                      </button>
+                      <button onClick={() => handleRejectDeposit(d)} className="flex-1 bg-red-600 hover:bg-red-700 text-white py-3 rounded-xl font-bold text-sm shadow-sm transition-all active:scale-[0.98]">
+                        Reject
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
         {activeTab === 'withdrawals' && (
           <div className="divide-y divide-gray-50">
-            {withdrawals.map(w => (
+            {withdrawals.length === 0 ? (
+              <div className="p-12 text-center text-gray-400">
+                <Clock className="w-12 h-12 mx-auto mb-4 opacity-20" />
+                <p className="font-bold">No withdrawals found</p>
+              </div>
+            ) : withdrawals.map(w => (
               <div key={w.id} className="p-4 space-y-3">
                 <div className="flex justify-between items-start">
                   <div>
@@ -1669,9 +2463,20 @@ const AdminDashboard = () => {
                     {w.status}
                   </span>
                 </div>
-                <div className="bg-gray-50 p-2 rounded text-[10px] font-mono break-all border border-gray-100">
-                  <span className="font-bold text-gray-400 mr-2 uppercase">{w.network || 'BEP20'}:</span>
-                  {w.walletAddress}
+                <div className="bg-gray-50 p-2 rounded text-[10px] font-mono break-all border border-gray-100 flex items-center justify-between">
+                  <div className="flex-1">
+                    <span className="font-bold text-gray-400 mr-2 uppercase">{w.network || 'BEP20'}:</span>
+                    {w.walletAddress}
+                  </div>
+                  <button 
+                    onClick={() => {
+                      navigator.clipboard.writeText(w.walletAddress);
+                      setAdminStatus({ type: 'success', message: 'Address copied!' });
+                    }}
+                    className="ml-2 p-1 text-gray-400 hover:text-indigo-600 transition-colors"
+                  >
+                    <Copy className="w-3 h-3" />
+                  </button>
                 </div>
                 {w.status === 'pending' && (
                   <div className="flex space-x-2">
@@ -1687,20 +2492,32 @@ const AdminDashboard = () => {
         {activeTab === 'investments' && (
           <div className="divide-y divide-gray-50">
             {investments.map(inv => (
-              <div key={inv.id} className="p-4 space-y-3">
+               <div key={inv.id} className="p-4 space-y-3">
                 <div className="flex justify-between items-start">
                   <div>
                     <p className="text-sm font-bold text-gray-900">{inv.userEmail}</p>
                     <p className="text-xs text-gray-500">{inv.planName}</p>
                     <p className="text-lg font-black text-purple-600">${inv.amount} USDT</p>
                   </div>
-                  <span className={`text-[10px] font-bold px-2 py-1 rounded uppercase ${
-                    inv.status === 'pending' ? 'bg-orange-100 text-orange-600' : 
-                    inv.status === 'active' ? 'bg-green-100 text-green-600' : 
-                    inv.status === 'completed' ? 'bg-blue-100 text-blue-600' : 'bg-red-100 text-red-600'
-                  }`}>
-                    {inv.status}
-                  </span>
+                  <div className="flex flex-col items-end space-y-2">
+                    <span className={`text-[10px] font-bold px-2 py-1 rounded uppercase ${
+                      inv.status === 'pending' ? 'bg-orange-100 text-orange-600' : 
+                      inv.status === 'active' ? 'bg-green-100 text-green-600' : 
+                      inv.status === 'completed' ? 'bg-blue-100 text-blue-600' : 'bg-red-100 text-red-600'
+                    }`}>
+                      {inv.status}
+                    </span>
+                    <button 
+                      onClick={() => {
+                        if (confirm('Are you sure you want to delete this investment?')) {
+                          handleDeleteInvestment(inv.id);
+                        }
+                      }}
+                      className="text-[10px] text-red-600 font-bold hover:underline"
+                    >
+                      Delete
+                    </button>
+                  </div>
                 </div>
               </div>
             ))}
@@ -1773,6 +2590,32 @@ const AdminDashboard = () => {
           </div>
         </div>
       )}
+
+      {selectedScreenshot && (
+        <div 
+          className="fixed inset-0 bg-black/90 flex items-center justify-center p-4 z-[70] cursor-zoom-out"
+          onClick={() => setSelectedScreenshot(null)}
+        >
+          <motion.div 
+            initial={{ scale: 0.9, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            className="max-w-4xl w-full max-h-[90vh] flex items-center justify-center"
+          >
+            <img 
+              src={selectedScreenshot} 
+              alt="Deposit Proof Full" 
+              className="max-w-full max-h-full object-contain rounded-lg shadow-2xl"
+            />
+          </motion.div>
+          <button 
+            onClick={() => setSelectedScreenshot(null)}
+            className="absolute top-6 right-6 text-white bg-white/10 hover:bg-white/20 p-2 rounded-full transition-colors"
+          >
+            <CheckCircle2 className="w-8 h-8 rotate-45" /> {/* Using rotate-45 as a quick close icon mockup */}
+          </button>
+        </div>
+      )}
+
     </div>
   );
 };
@@ -1839,31 +2682,48 @@ const SuccessOverlay = ({ message, visible }: { message: string, visible: boolea
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-gray-900/80 backdrop-blur-xl p-4"
         >
           <motion.div 
-            initial={{ scale: 0.9, y: 20 }}
-            animate={{ scale: 1, y: 0 }}
-            exit={{ scale: 0.9, y: 20 }}
-            className="bg-white rounded-3xl p-8 max-w-sm w-full text-center shadow-2xl"
+            initial={{ scale: 0.8, opacity: 0, y: 40 }}
+            animate={{ scale: 1, opacity: 1, y: 0 }}
+            exit={{ scale: 0.8, opacity: 0, y: -40 }}
+            transition={{ type: 'spring', damping: 25, stiffness: 400 }}
+            className="bg-white rounded-[3rem] p-12 max-w-sm w-full text-center shadow-[0_35px_70px_-15px_rgba(0,0,0,0.5)] border border-white/20"
           >
-            <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-6">
-              <Check className="w-10 h-10 text-green-600" />
+            <div className="relative mb-8">
+              <motion.div 
+                initial={{ scale: 0 }}
+                animate={{ scale: 1 }}
+                transition={{ delay: 0.1, type: 'spring', stiffness: 200, damping: 15 }}
+                className="w-28 h-28 bg-gradient-to-br from-green-400 to-green-600 rounded-full flex items-center justify-center mx-auto shadow-2xl shadow-green-200"
+              >
+                <Check className="w-14 h-14 text-white stroke-[3px]" />
+              </motion.div>
+              <motion.div 
+                animate={{ scale: [1, 1.2, 1], opacity: [0, 0.5, 0] }}
+                transition={{ duration: 2, repeat: Infinity }}
+                className="absolute inset-0 bg-green-400 rounded-full blur-2xl -z-10"
+              />
             </div>
-            <h3 className="text-2xl font-black text-gray-900 mb-2">{message}</h3>
-            <p className="text-gray-500">Redirecting you to home...</p>
-            <div className="mt-8 flex justify-center">
-              <div className="flex space-x-1">
-                {[0, 1, 2].map((i) => (
-                  <motion.div
-                    key={i}
-                    animate={{ scale: [1, 1.5, 1], opacity: [0.3, 1, 0.3] }}
-                    transition={{ duration: 1, repeat: Infinity, delay: i * 0.2 }}
-                    className="w-2 h-2 bg-green-500 rounded-full"
-                  />
-                ))}
-              </div>
-            </div>
+            
+            <h3 className="text-4xl font-black text-gray-900 mb-4 tracking-tight leading-tight">
+              {message}
+            </h3>
+            <p className="text-gray-500 font-bold text-base uppercase tracking-widest opacity-60">
+              Processing...
+            </p>
+            
+            <motion.div 
+              initial={{ width: 0 }}
+              animate={{ width: "100%" }}
+              transition={{ duration: 1.5, ease: "easeInOut" }}
+              className="h-1.5 bg-green-500 rounded-full mt-10 mx-auto max-w-[100px]"
+            />
+            
+            <p className="mt-8 text-sm font-semibold text-gray-400">
+              Returning to Dashboard
+            </p>
           </motion.div>
         </motion.div>
       )}
@@ -1871,12 +2731,213 @@ const SuccessOverlay = ({ message, visible }: { message: string, visible: boolea
   );
 };
 
+// --- Utilities ---
+const generateReferralCode = async () => {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let code = '';
+  let unique = false;
+  let attempts = 0;
+
+  while (!unique && attempts < 10) {
+    code = '';
+    for (let i = 0; i < 6; i++) {
+      code += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    
+    // Check uniqueness in referralCodes collection
+    const refDoc = await getDoc(doc(db, 'referralCodes', code));
+    if (!refDoc.exists()) {
+      unique = true;
+    }
+    attempts++;
+  }
+  return code;
+};
+
+const getDeviceId = () => {
+  let id = localStorage.getItem('pixi_device_id');
+  if (!id) {
+    id = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+    localStorage.setItem('pixi_device_id', id);
+  }
+  return id;
+};
+
+const EmailVerificationPage = ({ user, onLogout, onDeviceVerified }: { user: FirebaseUser, onLogout: () => void, onDeviceVerified?: () => void }) => {
+  const [sending, setSending] = useState(false);
+  const [message, setMessage] = useState('');
+  const [isVerifying, setIsVerifying] = useState(false);
+
+  const handleResend = async () => {
+    setSending(true);
+    try {
+      await sendEmailVerification(user);
+      setMessage('Verification email sent! Please check your inbox.');
+    } catch (err: any) {
+      if (err.code === 'auth/too-many-requests') {
+        setMessage('Too many requests. Please wait a moment.');
+      } else {
+        setMessage(err.message || 'Error sending email.');
+      }
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const handleRefresh = async () => {
+    try {
+      await reload(user);
+      if (user.emailVerified) {
+        setMessage('Email verified! Authorizing your device...');
+        setTimeout(() => {
+          if (onDeviceVerified) onDeviceVerified();
+        }, 1000);
+      } else {
+        setMessage('Email not verified yet. Please check your inbox.');
+      }
+    } catch (err: any) {
+      setMessage(err.message || 'Error refreshing status.');
+    }
+  };
+
+  const handleAuthorizeDevice = async () => {
+    setIsVerifying(true);
+    try {
+      // Small simulated delay for security verification feel
+      await new Promise(resolve => setTimeout(resolve, 800));
+      if (onDeviceVerified) onDeviceVerified();
+    } catch (err: any) {
+      setMessage('Authorization failed. Please try again.');
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.9 }}
+        animate={{ opacity: 1, scale: 1 }}
+        className="max-w-md w-full bg-white rounded-[2.5rem] shadow-2xl p-10 text-center ring-1 ring-gray-100"
+      >
+        <div className="w-24 h-24 bg-indigo-100 rounded-3xl flex items-center justify-center mx-auto mb-8 text-indigo-600 shadow-inner">
+          <Mail className="w-12 h-12" />
+        </div>
+
+        {user.emailVerified ? (
+          <>
+            <h1 className="text-3xl font-black text-gray-900 mb-3 tracking-tight">New Device Detected</h1>
+            <p className="text-gray-500 mb-8 font-medium leading-relaxed">
+              We detected a login from a new device for <br/>
+              <span className="text-indigo-600 font-bold">{user.email}</span>. <br/>
+              Since your email is already verified, please confirm to continue.
+            </p>
+            
+            <button 
+              onClick={handleAuthorizeDevice}
+              disabled={isVerifying}
+              className="w-full bg-indigo-600 text-white rounded-2xl py-5 font-black text-lg shadow-[0_10px_20px_-5px_rgba(79,70,229,0.4)] hover:shadow-[0_15px_30px_-10px_rgba(79,70,229,0.5)] transition-all active:scale-[0.98] disabled:opacity-50 flex items-center justify-center gap-3"
+            >
+              {isVerifying ? (
+                <div className="w-6 h-6 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+              ) : (
+                <>
+                  <CheckCircle2 className="w-6 h-6" />
+                  Authorize This Device
+                </>
+              )}
+            </button>
+            <p className="mt-6 text-gray-400 text-[10px] font-bold uppercase tracking-widest">
+              Identity Confirmed via Google/Firebase
+            </p>
+          </>
+        ) : (
+          <>
+            <h1 className="text-3xl font-black text-gray-900 mb-3 tracking-tight">Verify Your Email</h1>
+            <p className="text-gray-500 mb-8 font-medium leading-relaxed">
+              We've sent a verification link to <br/>
+              <span className="text-indigo-600 font-bold text-lg">{user.email}</span>. <br/>
+              Please click it to activate your account.
+            </p>
+            
+            <div className="mb-8 p-4 bg-amber-50 rounded-2xl border border-amber-100">
+              <p className="text-amber-800 text-xs font-bold uppercase tracking-wider mb-1">Important</p>
+              <p className="text-amber-700 text-sm font-medium">
+                If you don't see the email, check your <span className="font-bold underline">Spam or Junk</span> folder.
+              </p>
+            </div>
+            
+            <div className="space-y-4">
+              <button 
+                onClick={handleRefresh}
+                className="w-full bg-indigo-600 text-white rounded-2xl py-5 font-black text-lg shadow-[0_10px_20px_-5px_rgba(79,70,229,0.4)] hover:shadow-[0_15px_30px_-10px_rgba(79,70,229,0.5)] transition-all active:scale-[0.98] flex items-center justify-center gap-2"
+              >
+                <span>Verify & Authorize</span>
+                <CheckCircle2 className="w-5 h-5" />
+              </button>
+
+              <button 
+                onClick={handleResend}
+                disabled={sending}
+                className="w-full bg-white text-indigo-600 border-2 border-indigo-50 rounded-2xl py-4 font-bold transition-all hover:bg-indigo-50/50 disabled:opacity-50"
+              >
+                {sending ? 'Sending...' : 'Resend Verification Link'}
+              </button>
+            </div>
+          </>
+        )}
+        
+        {message && (
+          <motion.div 
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className={`mt-6 p-4 rounded-2xl text-sm font-bold ${message.includes('Error') || message.includes('failed') || message.includes('not verified') ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-600'}`}
+          >
+            {message}
+          </motion.div>
+        )}
+
+        <button 
+          onClick={onLogout}
+          className="mt-8 text-gray-400 hover:text-red-500 font-bold transition-colors flex items-center justify-center gap-2 mx-auto text-sm"
+        >
+          <LogOut className="w-4 h-4" />
+          Logout & Try Another Account
+        </button>
+      </motion.div>
+    </div>
+  );
+};
+
 function AppContent() {
   const navigate = useNavigate();
+
+  // Firestore Connection Sync Test
+  useEffect(() => {
+    const syncTest = async () => {
+      try {
+        // Essential test to ensure Firestore is reachable
+        await getDocFromServer(doc(db, 'system', 'connection_health'));
+      } catch (err: any) {
+        if (err.message?.includes('the client is offline')) {
+          console.error("Firebase Sync Error: Client is offline. Database connection interrupted.");
+        } else {
+          console.log("Firebase Database synchronized and live.");
+        }
+      }
+    };
+    syncTest();
+  }, []);
+
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [investments, setInvestments] = useState<Investment[]>([]);
+  const [deposits, setDeposits] = useState<Deposit[]>([]);
+  const [withdrawals, setWithdrawals] = useState<Withdrawal[]>([]);
+  const [notifs, setNotifs] = useState<any[]>([]);
+  const [allInvestments, setAllInvestments] = useState<Investment[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isNewDevice, setIsNewDevice] = useState(false);
   const [notification, setNotification] = useState<{ message: string, visible: boolean }>({ message: '', visible: false });
 
   const showSuccessAndRedirect = (message: string) => {
@@ -1884,7 +2945,20 @@ function AppContent() {
     setTimeout(() => {
       setNotification({ message: '', visible: false });
       navigate('/');
-    }, 3000);
+    }, 1500);
+  };
+
+  const handleDeviceVerified = async () => {
+    if (!user || !profile) return;
+    const deviceId = getDeviceId();
+    const userRef = doc(db, 'users', user.uid);
+    const updatedKnownDevices = [...(profile.knownDevices || []), deviceId];
+    try {
+      await updateDoc(userRef, { knownDevices: updatedKnownDevices });
+      setIsNewDevice(false);
+    } catch (err) {
+      console.error("Failed to register device:", err);
+    }
   };
 
   // Auth Listener
@@ -1907,93 +2981,167 @@ function AppContent() {
     const userRef = doc(db, 'users', user.uid);
     const unsubProfile = onSnapshot(userRef, (snap) => {
       if (snap.exists()) {
-        setProfile({ uid: user.uid, ...snap.data() } as UserProfile);
+        const data = snap.data() as UserProfile;
+        const currentDeviceId = getDeviceId();
+        const devices = data.knownDevices || [];
+        
+        // Strict: Any account (User or Admin) on a new device must verify
+        if (!devices.includes(currentDeviceId)) {
+          setIsNewDevice(true);
+        } else {
+          setIsNewDevice(false);
+        }
+
+        // Auto-generate referral code for legacy users if missing
+        if (!data.referralCode) {
+          generateReferralCode().then(code => {
+            const batch = writeBatch(db);
+            batch.update(userRef, { referralCode: code });
+            batch.set(doc(db, 'referralCodes', code), { uid: user.uid });
+            batch.commit().catch(console.error);
+          });
+        }
+
+        // Auto-fix admin role for recognized ADMIN_EMAILS
+        if (ADMIN_EMAILS.includes(user.email || '')) {
+          if (data.role !== 'admin') {
+             updateDoc(userRef, { role: 'admin' }).catch(console.error);
+          }
+          setProfile({ uid: user.uid, ...data, role: 'admin' } as UserProfile);
+        } else {
+          setProfile({ uid: user.uid, ...data } as UserProfile);
+        }
+      } else if (ADMIN_EMAILS.includes(user.email || '')) {
+        // Create missing admin profile
+        generateReferralCode().then(myReferralCode => {
+          const profileData: UserProfile = {
+            uid: user.uid,
+            email: user.email || 'admin@pixi.com',
+            balance: 0,
+            totalCommissionsEarned: 0,
+            referralCode: myReferralCode,
+            referredBy: null,
+            role: 'admin',
+            status: 'active',
+            knownDevices: [getDeviceId()],
+            createdAt: serverTimestamp()
+          };
+          const batch = writeBatch(db);
+          batch.set(userRef, profileData);
+          batch.set(doc(db, 'referralCodes', myReferralCode), { uid: user.uid });
+          batch.commit().catch(console.error);
+          setProfile(profileData);
+        });
       }
       setLoading(false);
     }, (err) => {
       handleFirestoreError(err, OperationType.GET, `users/${user.uid}`);
     });
 
-    const q = query(collection(db, 'investments'), where('userId', '==', user.uid));
-    const unsubInvestments = onSnapshot(q, (snap) => {
+    const qInvs = query(collection(db, 'investments'), where('userId', '==', user.uid));
+    const unsubInvestments = onSnapshot(qInvs, (snap) => {
       setInvestments(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Investment)));
     }, (err) => {
       handleFirestoreError(err, OperationType.LIST, 'investments');
     });
 
+    const qDeps = query(collection(db, 'deposits'), where('userId', '==', user.uid));
+    const unsubDeposits = onSnapshot(qDeps, (snap) => {
+      setDeposits(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as any)).filter(d => !d.isInternalSeed));
+    }, (err) => {
+      handleFirestoreError(err, OperationType.LIST, 'deposits');
+    });
+
+    const qWiths = query(collection(db, 'withdrawals'), where('userId', '==', user.uid));
+    const unsubWithdrawals = onSnapshot(qWiths, (snap) => {
+      setWithdrawals(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as any)).filter(d => !d.isInternalSeed));
+    }, (err) => {
+      handleFirestoreError(err, OperationType.LIST, 'withdrawals');
+    });
+
+    const qNotifs = query(collection(db, 'notifications'), where('userId', 'in', [user.uid, 'all']));
+    const unsubNotifs = onSnapshot(qNotifs, (snap) => {
+      setNotifs(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as any)));
+    }, (err) => {
+      handleFirestoreError(err, OperationType.LIST, 'notifications_listener');
+    });
+
+    let unsubAllInvestments = () => {};
+    if (profile?.role === 'admin') {
+      unsubAllInvestments = onSnapshot(query(collection(db, 'investments'), where('status', '==', 'active')), (snap) => {
+        setAllInvestments(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Investment)));
+      }, (err) => {
+        handleFirestoreError(err, OperationType.LIST, 'all_investments');
+      });
+    }
+
     return () => {
       unsubProfile();
       unsubInvestments();
+      unsubDeposits();
+      unsubWithdrawals();
+      unsubNotifs();
+      unsubAllInvestments();
     };
-  }, [user]);
-
-  // Daily Payout Logic
-  useEffect(() => {
-    if (!user || investments.length === 0) return;
-
-    const checkPayouts = async () => {
-      const now = new Date();
-      const activeInvs = investments.filter(i => i.status === 'active');
-      
-      for (const inv of activeInvs) {
-        if (!inv.startDate || !inv.amount) continue;
-        
-        const lastPayout = inv.lastPayoutDate?.seconds 
-          ? new Date(inv.lastPayoutDate.seconds * 1000) 
-          : new Date(inv.startDate.seconds * 1000);
-        
-        const diffDays = Math.floor((now.getTime() - lastPayout.getTime()) / (1000 * 60 * 60 * 24));
-        
-        if (diffDays >= 1) {
-          try {
-            const payoutAmount = inv.amount * 0.1 * diffDays;
-            const uRef = doc(db, 'users', user.uid);
-            const invRef = doc(db, 'investments', inv.id);
-            
-            const batch = writeBatch(db);
-            batch.update(uRef, { balance: increment(payoutAmount) });
-            batch.update(invRef, { lastPayoutDate: serverTimestamp() });
-            
-            if (inv.endDate?.seconds) {
-              const endDate = new Date(inv.endDate.seconds * 1000);
-              if (now >= endDate) {
-                batch.update(invRef, { status: 'completed' });
-              }
-            }
-            
-            await batch.commit();
-          } catch (err) {
-            handleFirestoreError(err, OperationType.WRITE, 'daily_payout');
-          }
-        }
-      }
-    };
-
-    const interval = setInterval(checkPayouts, 60000);
-    checkPayouts();
-    return () => clearInterval(interval);
-  }, [user, investments]);
+  }, [user, profile?.role]);
 
   const handleLogin = async (email: string, pass: string, isSignup: boolean, referralCode?: string) => {
+    // Map custom admin username to admin email
+    let targetEmail = email;
+    if (email.toLowerCase() === ADMIN_USERNAME.toLowerCase()) {
+      targetEmail = "adminpixi25@gmail.com";
+    }
+
     try {
+      const isAdmin = ADMIN_EMAILS.includes(targetEmail);
+
       if (isSignup) {
-        const { user: newUser } = await createUserWithEmailAndPassword(auth, email, pass);
-        const myReferralCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+        if (referralCode) {
+          // Verify referral code exists (Check dedicated collection first, then fallback to users collection for backward compatibility)
+          let codeExists = false;
+          const refDoc = await getDoc(doc(db, 'referralCodes', referralCode));
+          if (refDoc.exists()) {
+            codeExists = true;
+          } else {
+            // Fallback for codes generated before the dedicated collection was added
+            const q = query(collection(db, 'users'), where('referralCode', '==', referralCode));
+            const userSnap = await getDocs(q);
+            codeExists = !userSnap.empty;
+          }
+
+          if (!codeExists && !isAdmin) {
+            throw new Error('Invalid referral code. Please check and try again.');
+          }
+        }
+
+        const { user: newUser } = await createUserWithEmailAndPassword(auth, targetEmail, pass);
+        const myReferralCode = await generateReferralCode();
         
         const profileData: UserProfile = {
           uid: newUser.uid,
-          email: newUser.email!,
+          email: targetEmail.toLowerCase(),
           balance: 0,
           totalCommissionsEarned: 0,
           referralCode: myReferralCode,
           referredBy: referralCode || null,
-          role: email === ADMIN_EMAIL ? 'admin' : 'user',
+          role: ADMIN_EMAILS.includes(targetEmail.toLowerCase()) ? 'admin' : 'user',
           status: 'active',
+          knownDevices: [getDeviceId()],
           createdAt: serverTimestamp()
         };
         
         try {
-          await setDoc(doc(db, 'users', newUser.uid), profileData);
+          const batch = writeBatch(db);
+          batch.set(doc(db, 'users', newUser.uid), profileData);
+          batch.set(doc(db, 'referralCodes', myReferralCode), { uid: newUser.uid });
+          
+          // Welcome notification
+          batch.set(doc(collection(db, 'notifications')), {
+            userId: newUser.uid,
+            title: 'Welcome to PIXI STAKING!',
+            message: 'Your account is ready. Start your journey by making your first deposit and staking in our plans.',
+            createdAt: serverTimestamp()
+          });
           
           // Create referral record if referred
           if (referralCode) {
@@ -2001,20 +3149,54 @@ function AppContent() {
             const referrerSnap = await getDocs(q);
             if (!referrerSnap.empty) {
               const referrerDoc = referrerSnap.docs[0];
-              await addDoc(collection(db, 'referrals'), {
+              batch.set(doc(db, 'referrals', newUser.uid), {
                 referrerUid: referrerDoc.id,
                 referredUid: newUser.uid,
-                referredEmail: newUser.email,
+                referredEmail: targetEmail.toLowerCase(),
+                isActiveInvestor: false,
+                commissionEarned: 0,
                 createdAt: serverTimestamp()
               });
             }
           }
+          await batch.commit();
         } catch (err) {
-          handleFirestoreError(err, OperationType.WRITE, `users/${newUser.uid}`);
+          handleFirestoreError(err, OperationType.WRITE, `signup_batch_${newUser.uid}`);
         }
         setProfile(profileData);
       } else {
-        await signInWithEmailAndPassword(auth, email, pass);
+        try {
+          await signInWithEmailAndPassword(auth, targetEmail, pass);
+        } catch (err: any) {
+          // If login fails and it matches our "inbuilt" admin credentials, try to restore
+          const isRestorableAdmin = (ADMIN_EMAILS.includes(email) || email === ADMIN_USERNAME) && pass === ADMIN_PASSWORD;
+          
+          if (isRestorableAdmin && (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential' || err.code === 'auth/wrong-password')) {
+            console.log("Admin account mismatch, attempting to restore/signup...");
+            try {
+              // Ensure we use the mapped targetEmail for creation
+              await createUserWithEmailAndPassword(auth, targetEmail, pass);
+              // Profile will be auto-created by the Data Listener useEffect
+            } catch (signupErr: any) {
+              // If signup fails because email is already in use, it means the user exists but password was wrong
+              if (signupErr.code === 'auth/email-already-in-use') {
+                throw err; // Throw original login error
+              }
+              
+              if (email === ADMIN_USERNAME) {
+                try {
+                  await signInWithEmailAndPassword(auth, ADMIN_EMAIL, pass);
+                  return;
+                } catch (retryErr) {
+                  throw err;
+                }
+              }
+              throw err;
+            }
+          } else {
+            throw err;
+          }
+        }
       }
     } catch (err: any) {
       console.error("Login error:", err);
@@ -2031,21 +3213,46 @@ function AppContent() {
       const userSnap = await getDoc(userRef);
       
       if (!userSnap.exists()) {
-        const myReferralCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+        // New user! 
+        const isAdmin = ADMIN_EMAILS.includes(googleUser.email || '');
+        
+        if (referralCode) {
+          // Verify referral code exists (Check dedicated collection first, then fallback to users collection)
+          let codeExists = false;
+          const refDoc = await getDoc(doc(db, 'referralCodes', referralCode));
+          if (refDoc.exists()) {
+            codeExists = true;
+          } else {
+            const q = query(collection(db, 'users'), where('referralCode', '==', referralCode));
+            const userSnap = await getDocs(q);
+            codeExists = !userSnap.empty;
+          }
+
+          if (!codeExists && !isAdmin) {
+            throw new Error('Invalid referral code. Please check and try again.');
+          }
+        }
+
+        const userEmail = googleUser.email?.toLowerCase() || "";
+        const myReferralCode = await generateReferralCode();
         const profileData: UserProfile = {
           uid: googleUser.uid,
-          email: googleUser.email!,
+          email: userEmail,
           balance: 0,
           totalCommissionsEarned: 0,
           referralCode: myReferralCode,
           referredBy: referralCode || null,
-          role: googleUser.email === ADMIN_EMAIL ? 'admin' : 'user',
+          role: ADMIN_EMAILS.includes(userEmail) ? 'admin' : 'user',
           status: 'active',
+          knownDevices: [getDeviceId()],
           createdAt: serverTimestamp()
         };
         
         try {
-          await setDoc(userRef, profileData);
+          const batch = writeBatch(db);
+          batch.set(userRef, profileData);
+          batch.set(doc(db, 'referralCodes', myReferralCode), { uid: googleUser.uid });
+          await batch.commit();
 
           // Create referral record if referred
           if (referralCode) {
@@ -2053,10 +3260,12 @@ function AppContent() {
             const referrerSnap = await getDocs(q);
             if (!referrerSnap.empty) {
               const referrerDoc = referrerSnap.docs[0];
-              await addDoc(collection(db, 'referrals'), {
+              await setDoc(doc(db, 'referrals', googleUser.uid), {
                 referrerUid: referrerDoc.id,
                 referredUid: googleUser.uid,
-                referredEmail: googleUser.email,
+                referredEmail: userEmail,
+                isActiveInvestor: false,
+                commissionEarned: 0,
                 createdAt: serverTimestamp()
               });
             }
@@ -2079,16 +3288,25 @@ function AppContent() {
   const handleInvest = async (plan: any, amount: number) => {
     if (!user || !profile) return;
 
+    // Security: Enforce min/max in backend logic
+    if (amount < plan.min || amount > plan.max) {
+      throw new Error(`Invalid amount. For ${plan.name}, amount must be between ${plan.min} and ${plan.max} USDT.`);
+    }
+
+    if (profile.balance < amount) {
+      throw new Error('Insufficient balance to perform this operation.');
+    }
+
+    // Check if it's the first investment for referral commission
+    const allInvQuery = query(collection(db, 'investments'), where('userId', '==', user.uid));
+    const allInvSnap = await getDocs(allInvQuery);
+    const isFirstInvestment = allInvSnap.empty;
+
     if (plan.oneTime) {
       const q = query(collection(db, 'investments'), where('userId', '==', user.uid), where('planId', '==', plan.id));
-      let snap;
-      try {
-        snap = await getDocs(q);
-      } catch (err) {
-        handleFirestoreError(err, OperationType.LIST, 'investments_one_time_check');
-      }
-      if (snap && !snap.empty) {
-        throw new Error('Starter plan can only be purchased once.');
+      const snap = await getDocs(q);
+      if (!snap.empty) {
+        throw new Error(`${plan.name} can only be purchased once.`);
       }
     }
 
@@ -2098,10 +3316,10 @@ function AppContent() {
 
     const investmentData = {
       userId: user.uid,
-      userEmail: user.email,
-      amount,
+      userEmail: user.email || 'no-email',
+      amount: Number(amount),
       planId: plan.id,
-      planName: plan.name,
+      planName: plan.name || 'Standard Plan',
       startDate: serverTimestamp(),
       endDate: Timestamp.fromDate(endDate),
       lastPayoutDate: serverTimestamp(),
@@ -2109,48 +3327,53 @@ function AppContent() {
     };
 
     try {
-      await addDoc(collection(db, 'investments'), investmentData);
+      const batch = writeBatch(db);
       
-      // Show success message
-      showSuccessAndRedirect('Stake Successful');
+      // 1. Create Investment
+      const invRef = doc(collection(db, 'investments'));
+      batch.set(invRef, investmentData);
 
-      // Update balance
-      try {
-        await updateDoc(doc(db, 'users', user.uid), {
-          balance: increment(-amount)
-        });
-      } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, `users/${user.uid}`);
-      }
+      // 2. Update user state: Deduct balance AND mark as active investor
+      batch.update(doc(db, 'users', user.uid), {
+        balance: increment(-amount),
+        isActiveInvestor: true
+      });
 
-      // Handle Referral Commission (10%)
-      if (profile.referredBy) {
-        try {
-          // Update Referral record to active investor
-          const refQuery = query(collection(db, 'referrals'), where('referredUid', '==', user.uid));
-          const refSnap = await getDocs(refQuery);
-          if (!refSnap.empty) {
-            await updateDoc(doc(db, 'referrals', refSnap.docs[0].id), { isActiveInvestor: true });
-          }
-
-          const q = query(collection(db, 'users'), where('referralCode', '==', profile.referredBy));
-          const referrerSnap = await getDocs(q);
+      // 3. Handle Referral Commission (10%) - ONLY for the first investment
+      if (isFirstInvestment && profile.referredBy) {
+        // Find referrer by referral code
+        const refQuery = query(collection(db, 'users'), where('referralCode', '==', profile.referredBy));
+        const refSnap = await getDocs(refQuery);
+        
+        if (!refSnap.empty) {
+          const referrerDoc = refSnap.docs[0];
+          const commission = amount * 0.10;
           
-          if (!referrerSnap.empty) {
-            const referrerDoc = referrerSnap.docs[0];
-            const commission = amount * 0.10;
-            await updateDoc(doc(db, 'users', referrerDoc.id), {
-              balance: increment(commission),
-              totalCommissionsEarned: increment(commission)
+          // Credit Referrer
+          batch.update(referrerDoc.ref, {
+            balance: increment(commission),
+            totalCommissionsEarned: increment(commission)
+          });
+
+          // Mark specific referral record as active IF it exists
+          const referralRef = doc(db, 'referrals', user.uid);
+          const referralSnap = await getDoc(referralRef);
+          if (referralSnap.exists()) {
+            batch.update(referralRef, { 
+              isActiveInvestor: true,
+              commissionEarned: commission,
+              processedAt: serverTimestamp()
             });
           }
-        } catch (err) {
-          console.error("Commission processing error:", err);
-          // Don't fail the whole investment if commission fails, but log it
         }
       }
+
+      await batch.commit();
+      showSuccessAndRedirect('Stake Successful');
+
     } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, 'investments');
+      console.error("Investment error:", err);
+      handleFirestoreError(err, OperationType.WRITE, 'investments_transaction');
     }
   };
 
@@ -2160,6 +3383,11 @@ function AppContent() {
         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
       </div>
     );
+  }
+
+  // Email Verification & Device Authorization Gate
+  if (user && isNewDevice) {
+    return <EmailVerificationPage user={user} onLogout={handleLogout} onDeviceVerified={handleDeviceVerified} />;
   }
 
   if (profile && profile.status && profile.status !== 'active') {
@@ -2189,21 +3417,32 @@ function AppContent() {
   return (
     <>
       <SuccessOverlay message={notification.message} visible={notification.visible} />
+      
+      {profile?.role === 'admin' && (
+        <AdminPayoutProcessor investments={allInvestments} onPayoutSuccess={() => {}} />
+      )}
+
       <div className="min-h-screen bg-gray-50 pb-20 md:pb-0 md:pt-20">
-        <Navbar user={user} profile={profile} onLogout={handleLogout} />
+        <Navbar 
+          user={user} 
+          profile={profile} 
+          onLogout={handleLogout} 
+          notificationCount={notifs.length} 
+        />
         
         <main className="max-w-5xl mx-auto px-4 py-8">
           <Routes>
             <Route path="/login" element={!user ? <LoginPage onLogin={handleLogin} onGoogleLogin={handleGoogleLogin} /> : <Navigate to="/" />} />
+            <Route path="/signup" element={!user ? <LoginPage initiallySignup={true} onLogin={handleLogin} onGoogleLogin={handleGoogleLogin} /> : <Navigate to="/" />} />
             
-            <Route path="/" element={user ? <HomePage profile={profile} investments={investments} /> : <Navigate to="/login" />} />
+            <Route path="/" element={user ? <HomePage profile={profile} investments={investments} deposits={deposits} withdrawals={withdrawals} /> : <Navigate to="/login" />} />
             <Route path="/plans" element={user ? <PlansPage profile={profile} onInvest={handleInvest} /> : <Navigate to="/login" />} />
-            <Route path="/deposit" element={user ? <DepositPage profile={profile} onSuccess={() => showSuccessAndRedirect('Deposit Processing')} /> : <Navigate to="/login" />} />
-            <Route path="/withdrawal" element={user ? <WithdrawalPage profile={profile} onSuccess={() => showSuccessAndRedirect('Withdrawal Successful')} /> : <Navigate to="/login" />} />
-            <Route path="/notifications" element={user ? <NotificationsPage /> : <Navigate to="/login" />} />
+            <Route path="/deposit" element={user ? <DepositPage profile={profile} user={user} onSuccess={() => showSuccessAndRedirect('Deposit Successful')} /> : <Navigate to="/login" />} />
+            <Route path="/withdrawal" element={user ? <WithdrawalPage profile={profile} user={user} onSuccess={() => showSuccessAndRedirect('Withdrawal Successful')} /> : <Navigate to="/login" />} />
+            <Route path="/notifications" element={user ? <NotificationsPage user={user} /> : <Navigate to="/login" />} />
             <Route path="/team" element={user ? <TeamPage profile={profile} /> : <Navigate to="/login" />} />
             
-            <Route path="/admin" element={profile?.role === 'admin' ? <AdminDashboard /> : <Navigate to="/" />} />
+            <Route path="/admin" element={profile?.role === 'admin' ? <AdminDashboard profile={profile} /> : <Navigate to="/" />} />
           </Routes>
         </main>
       </div>
