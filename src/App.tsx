@@ -128,7 +128,12 @@ import {
   Info,
   ArrowDownLeft,
   ArrowUpRight,
-  RefreshCw
+  RefreshCw,
+  Shield,
+  FileText,
+  Globe,
+  Send,
+  ExternalLink
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -1419,12 +1424,9 @@ const TeamPage = ({ profile }: { profile: UserProfile | null }) => {
   const activeInvestors = referrals.filter(r => r.isActiveInvestor);
   const totalCommissions = profile?.totalCommissionsEarned || 0;
 
-  // Generate a robust referral link that works in both dev and preview environments
+  // Generate a robust referral link that works with the user's custom domain
   const getReferralLink = () => {
-    const baseUrl = window.location.href.split('#')[0].split('?')[0];
-    // Ensure baseUrl ends with / if it doesn't end with a filename or /
-    const cleanBase = baseUrl.endsWith('.html') || baseUrl.endsWith('/') ? baseUrl : baseUrl + '/';
-    return `${cleanBase}#/login?ref=${profile?.referralCode}`;
+    return `https://pixistaking.uk/signup?ref=${profile?.referralCode || ''}`;
   };
   const referralLink = getReferralLink();
 
@@ -1459,12 +1461,12 @@ const TeamPage = ({ profile }: { profile: UserProfile | null }) => {
             <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Your Referral Link</p>
           </div>
           <div className="bg-indigo-50 p-3 rounded-xl border border-indigo-100 text-indigo-600 text-[10px] sm:text-xs font-mono break-all">
-            https://ais-pre-e3itapjzb6oyqazompsca3-658880038172.asia-southeast1.run.app/#/login
+            {referralLink}
           </div>
         </div>
         <button 
           onClick={() => {
-            navigator.clipboard.writeText('https://ais-pre-e3itapjzb6oyqazompsca3-658880038172.asia-southeast1.run.app/#/login');
+            navigator.clipboard.writeText(referralLink);
             setLinkCopied(true);
             setTimeout(() => setLinkCopied(false), 2000);
           }}
@@ -2909,6 +2911,341 @@ const EmailVerificationPage = ({ user, onLogout, onDeviceVerified }: { user: Fir
   );
 };
 
+const ContactPage = () => {
+  const [formData, setFormData] = useState({ name: '', email: '', subject: '', message: '' });
+  const [isSent, setIsSent] = useState(false);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSent(true);
+    setTimeout(() => {
+      setIsSent(false);
+      setFormData({ name: '', email: '', subject: '', message: '' });
+    }, 3000);
+  };
+
+  return (
+    <motion.div 
+      initial={{ opacity: 0, y: 15 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="max-w-4xl mx-auto space-y-10 pb-16"
+    >
+      <div className="text-center space-y-4">
+        <div className="w-16 h-16 bg-amber-100 rounded-2xl flex items-center justify-center mx-auto shadow-sm">
+          <Mail className="w-8 h-8 text-amber-600" />
+        </div>
+        <h1 className="text-4xl font-black text-gray-900 tracking-tight uppercase">Contact Us</h1>
+        <p className="text-gray-500 max-w-lg mx-auto leading-relaxed">
+          Have questions about your stakes, commissions, or need technical assistance? Our dedicated support team is here to help you 24/7.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <a 
+          href="mailto:support@pixistaking.uk" 
+          className="flex flex-col items-center text-center p-6 bg-white rounded-3xl border border-gray-100 shadow-sm hover:shadow-md transition-shadow"
+        >
+          <div className="w-12 h-12 bg-indigo-50 text-indigo-600 rounded-xl flex items-center justify-center mb-4">
+            <Mail className="w-6 h-6" />
+          </div>
+          <span className="text-[10px] uppercase tracking-widest font-bold text-gray-400 mb-1">Email Support</span>
+          <span className="text-sm font-semibold text-gray-900 break-all">support@pixistaking.uk</span>
+        </a>
+
+        <a 
+          href="https://t.me/pixistakingofficial" 
+          target="_blank" 
+          rel="noopener noreferrer"
+          className="flex flex-col items-center text-center p-6 bg-white rounded-3xl border border-gray-100 shadow-sm hover:shadow-md transition-shadow"
+        >
+          <div className="w-12 h-12 bg-sky-50 text-sky-500 rounded-xl flex items-center justify-center mb-4">
+            <Send className="w-6 h-6" />
+          </div>
+          <span className="text-[10px] uppercase tracking-widest font-bold text-gray-400 mb-1">Telegram Community</span>
+          <span className="text-sm font-semibold text-gray-900">@pixistakingofficial</span>
+        </a>
+
+        <a 
+          href="https://pixistaking.uk" 
+          target="_blank" 
+          rel="noopener noreferrer"
+          className="flex flex-col items-center text-center p-6 bg-white rounded-3xl border border-gray-100 shadow-sm hover:shadow-md transition-shadow"
+        >
+          <div className="w-12 h-12 bg-amber-50 text-amber-600 rounded-xl flex items-center justify-center mb-4">
+            <Globe className="w-6 h-6" />
+          </div>
+          <span className="text-[10px] uppercase tracking-widest font-bold text-gray-400 mb-1">Official Website</span>
+          <span className="text-sm font-semibold text-gray-900">pixistaking.uk</span>
+        </a>
+      </div>
+
+      <div className="bg-white p-8 sm:p-10 rounded-[2.5rem] border border-gray-100 shadow-sm">
+        <h2 className="text-2xl font-bold text-gray-900 mb-6 text-center font-sans tracking-tight">Send Us a Direct Message</h2>
+        <form onSubmit={handleSubmit} className="space-y-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+            <div>
+              <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Your Name</label>
+              <input 
+                type="text" 
+                required
+                value={formData.name}
+                onChange={e => setFormData({ ...formData, name: e.target.value })}
+                className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-colors bg-gray-50/50"
+                placeholder="Enter your name"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Email Address</label>
+              <input 
+                type="email" 
+                required
+                value={formData.email}
+                onChange={e => setFormData({ ...formData, email: e.target.value })}
+                className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-colors bg-gray-50/50"
+                placeholder="you@email.com"
+              />
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Subject</label>
+            <input 
+              type="text" 
+              required
+              value={formData.subject}
+              onChange={e => setFormData({ ...formData, subject: e.target.value })}
+              className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-colors bg-gray-50/50"
+              placeholder="What is this regarding?"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Message</label>
+            <textarea 
+              rows={4}
+              required
+              value={formData.message}
+              onChange={e => setFormData({ ...formData, message: e.target.value })}
+              className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-colors bg-gray-50/50 resize-none"
+              placeholder="Write your message here..."
+            />
+          </div>
+
+          <button 
+            type="submit"
+            disabled={isSent}
+            className={`w-full py-4 rounded-xl font-bold transition-all shadow-md flex items-center justify-center space-x-2 ${
+              isSent 
+                ? 'bg-green-500 text-white' 
+                : 'bg-indigo-600 text-white hover:bg-indigo-700'
+            }`}
+          >
+            {isSent ? (
+              <>
+                <Check className="w-5 h-5 animate-bounce" />
+                <span>Message Sent Successfully!</span>
+              </>
+            ) : (
+              <>
+                <Send className="w-4 h-4" />
+                <span>Send Message</span>
+              </>
+            )}
+          </button>
+        </form>
+      </div>
+    </motion.div>
+  );
+};
+
+const PrivacyPage = () => {
+  return (
+    <motion.div 
+      initial={{ opacity: 0, y: 15 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="max-w-4xl mx-auto space-y-10 pb-16"
+    >
+      <div className="text-center space-y-4">
+        <div className="w-16 h-16 bg-amber-100 rounded-2xl flex items-center justify-center mx-auto shadow-sm">
+          <Shield className="w-8 h-8 text-amber-600" />
+        </div>
+        <h1 className="text-4xl font-black text-gray-900 tracking-tight uppercase">Privacy Policy</h1>
+        <p className="text-gray-500 max-w-lg mx-auto leading-relaxed">
+          Learn how PIXI STAKING secures, processes, and protects your account details and digital transaction histories.
+        </p>
+      </div>
+
+      <div className="bg-white p-8 sm:p-12 rounded-[2.5rem] border border-gray-100 shadow-sm space-y-8 text-gray-600 leading-relaxed">
+        <p className="border-b border-gray-100 pb-6 text-sm text-gray-400 font-semibold uppercase tracking-wider">
+          Last Updated: June 2026
+        </p>
+
+        <section className="space-y-3">
+          <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+            <span className="w-1.5 h-6 bg-indigo-600 rounded-full" />
+            1. Information We Collect
+          </h2>
+          <p className="text-sm">
+            At PIXI STAKING, we value your privacy above all else. In order to provide reliable system access and secure staking rewards distributions, we collect the following types of information:
+          </p>
+          <ul className="list-disc pl-5 text-sm space-y-1">
+            <li><strong>Account Profiles:</strong> Your email address, username, login authentication logs, and local account permissions.</li>
+            <li><strong>Staking & Transaction Data:</strong> Records of deposits, choices of staking plan coefficients, calculations of earned commissions, and withdrawal configurations.</li>
+            <li><strong>Device Security Metadata:</strong> Distinct secure device identifier hash keys to protect your account against multi-device bypasses.</li>
+          </ul>
+        </section>
+
+        <section className="space-y-3">
+          <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+            <span className="w-1.5 h-6 bg-indigo-600 rounded-full" />
+            2. How We Use Your Data
+          </h2>
+          <p className="text-sm">
+            We operate strictly within user-centric parameters to execute your investment requests. The gathered information is processed solely to:
+          </p>
+          <ul className="list-disc pl-5 text-sm space-y-1">
+            <li>Calculate active staking interest compound loops securely.</li>
+            <li>Issue real-time in-app notifications and alerts about approvals.</li>
+            <li>Affiliate tracking linking team code referrals to real earned commission multipliers.</li>
+            <li>Verify devices securely using our cryptographically unique system hashes.</li>
+          </ul>
+        </section>
+
+        <section className="space-y-3">
+          <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+            <span className="w-1.5 h-6 bg-indigo-600 rounded-full" />
+            3. Data Retention and Safety Protocols
+          </h2>
+          <p className="text-sm">
+            All user balances, staking contracts, and deposit receipts are verified and retained securely via Cloud Firestore with secure validation rules. Direct client accesses are authenticated via Google Firebase security infrastructure. Your system secrets and database records are double-guarded using high-grade end-to-end industry encryptions.
+          </p>
+        </section>
+
+        <section className="space-y-3">
+          <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+            <span className="w-1.5 h-6 bg-indigo-600 rounded-full" />
+            4. Third-Party Sharing Rules
+          </h2>
+          <p className="text-sm">
+            PIXI STAKING does not rent, sell, or trade your personal analytical logs or storage identifiers to any third-party marketing entities. Information is shared only with our direct cloud service partners (such as Firebase Authentication & Storage engines) required strictly to execute active core app functions.
+          </p>
+        </section>
+
+        <section className="space-y-3">
+          <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+            <span className="w-1.5 h-6 bg-indigo-600 rounded-full" />
+            5. Cookies and Local Storage
+          </h2>
+          <p className="text-sm">
+            We use browser <code className="bg-gray-100 text-xs text-indigo-600 px-1 py-0.5 rounded font-mono">localStorage</code> components strictly to maintain safe session identities, system device validations, and prevent annoying forced re-authentications during consistent app loops.
+          </p>
+        </section>
+      </div>
+    </motion.div>
+  );
+};
+
+const TermsPage = () => {
+  return (
+    <motion.div 
+      initial={{ opacity: 0, y: 15 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="max-w-4xl mx-auto space-y-10 pb-16"
+    >
+      <div className="text-center space-y-4">
+        <div className="w-16 h-16 bg-amber-100 rounded-2xl flex items-center justify-center mx-auto shadow-sm">
+          <FileText className="w-8 h-8 text-amber-600" />
+        </div>
+        <h1 className="text-4xl font-black text-gray-900 tracking-tight uppercase">Terms & Conditions</h1>
+        <p className="text-gray-500 max-w-lg mx-auto leading-relaxed">
+          Please read these guidelines thoroughly. They define the binding agreement for interacting with PIXI STAKING packages.
+        </p>
+      </div>
+
+      <div className="bg-white p-8 sm:p-12 rounded-[2.5rem] border border-gray-100 shadow-sm space-y-8 text-gray-600 leading-relaxed">
+        <p className="border-b border-gray-100 pb-6 text-sm text-gray-400 font-semibold uppercase tracking-wider">
+          Last Updated: June 2026
+        </p>
+
+        <section className="space-y-3">
+          <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+            <span className="w-1.5 h-6 bg-indigo-600 rounded-full" />
+            1. User Agreement Acceptance
+          </h2>
+          <p className="text-sm">
+            By creating an account, registering profiles, depositing funds, or initiating staking programs on PIXI STAKING (<a href="https://pixistaking.uk" target="_blank" rel="noopener noreferrer" className="text-indigo-600 font-bold hover:underline">pixistaking.uk</a>), you declare that you have read, understood, and agreed to be legally bound by these entire Terms. If you do not accept these codes, you must suspend your access immediately.
+          </p>
+        </section>
+
+        <section className="space-y-3">
+          <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+            <span className="w-1.5 h-6 bg-indigo-600 rounded-full" />
+            2. Staking Calculations & Interest Plans
+          </h2>
+          <p className="text-sm">
+            Any capital locked inside PIXI STAKING compound products acts strictly on the specified plan coefficients:
+          </p>
+          <ul className="list-disc pl-5 text-sm space-y-1">
+            <li>Deposited digital balances cannot be traded or withdrawn while locked in an active plan tenure.</li>
+            <li>Accrued daily yields, payouts, and commissions are credited to your active wallet balance according to individual mathematical program constraints.</li>
+            <li>All investment processes are governed by decentralised, non-reversible, immutable tracking hooks.</li>
+          </ul>
+        </section>
+
+        <section className="space-y-3">
+          <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+            <span className="w-1.5 h-6 bg-indigo-600 rounded-full" />
+            3. Account Verification & Device Limits
+          </h2>
+          <p className="text-sm">
+            To combat multi-account sybil attacks and duplicate bonus farming exploits:
+          </p>
+          <ul className="list-disc pl-5 text-sm space-y-1">
+            <li>Users are strictly permitted only ONE active profile. Multi-accounts linked to identical referrals will trigger automated security locking.</li>
+            <li>Any access from unknown devices triggers a hardware protection validation layer. Logging in across unverified locations requires administrative approval.</li>
+          </ul>
+        </section>
+
+        <section className="space-y-3">
+          <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+            <span className="w-1.5 h-6 bg-indigo-600 rounded-full" />
+            4. Referral Commissions Policy
+          </h2>
+          <p className="text-sm">
+            The platform offers referral bonuses to reward genuine network expansion. Commissions are only validated on real deposits made by new unique referrals who complete their profiles. Attempting self-referring tricks, false signups, or creating duplicate chains under one's own codes results in immediate forfeiture of all balances and permanent system bans.
+          </p>
+        </section>
+
+        <section className="space-y-3">
+          <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+            <span className="w-1.5 h-6 bg-indigo-600 rounded-full" />
+            5. Disclaimer of Digital Assets Risk
+          </h2>
+          <p className="text-sm font-bold text-amber-700 bg-amber-50 p-4 rounded-xl border border-amber-100 flex items-start gap-2">
+            <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+            Staking digital currencies and participating in crypto projects carries high levels of market and security risks. You acknowledge that PIXI STAKING is not a centralized financial banking institution. Staking returns can fluctuate depending on global asset conditions, and you are entirely responsible for lockup choices. Only stake funds you can afford.
+          </p>
+        </section>
+      </div>
+    </motion.div>
+  );
+};
+
+const Footer = () => {
+  return (
+    <footer className="mt-16 border-t border-gray-200 pt-8 pb-12 text-center">
+      <div className="flex flex-col sm:flex-row justify-between items-center gap-4 text-sm text-gray-500 max-w-5xl mx-auto px-4">
+        <p className="font-medium text-gray-400">
+          Copyright © {new Date().getFullYear()} <span className="font-bold text-indigo-600">PIXI STAKING</span>. All rights reserved.
+        </p>
+        <div className="flex flex-wrap justify-center gap-6 font-bold text-gray-600">
+          <Link to="/contact" className="hover:text-amber-600 hover:underline transition-colors uppercase tracking-wider text-xs">Contact Us</Link>
+          <Link to="/privacy" className="hover:text-amber-600 hover:underline transition-colors uppercase tracking-wider text-xs">Privacy Policy</Link>
+          <Link to="/terms" className="hover:text-amber-600 hover:underline transition-colors uppercase tracking-wider text-xs">Terms & Conditions</Link>
+        </div>
+      </div>
+    </footer>
+  );
+};
+
 function AppContent() {
   const navigate = useNavigate();
 
@@ -2927,6 +3264,15 @@ function AppContent() {
       }
     };
     syncTest();
+  }, []);
+
+  // Canonical router redirect for clean URLs on custom domain
+  useEffect(() => {
+    const pathname = window.location.pathname.replace(/\/$/, ''); // strip trailing slash
+    const search = window.location.search;
+    if (pathname === '/signup' || pathname === '/login') {
+      window.location.replace(`/#${pathname}${search}`);
+    }
   }, []);
 
   const [user, setUser] = useState<FirebaseUser | null>(null);
@@ -3442,8 +3788,13 @@ function AppContent() {
             <Route path="/notifications" element={user ? <NotificationsPage user={user} /> : <Navigate to="/login" />} />
             <Route path="/team" element={user ? <TeamPage profile={profile} /> : <Navigate to="/login" />} />
             
+            <Route path="/contact" element={<ContactPage />} />
+            <Route path="/privacy" element={<PrivacyPage />} />
+            <Route path="/terms" element={<TermsPage />} />
+
             <Route path="/admin" element={profile?.role === 'admin' ? <AdminDashboard profile={profile} /> : <Navigate to="/" />} />
           </Routes>
+          <Footer />
         </main>
       </div>
     </>
