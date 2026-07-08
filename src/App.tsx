@@ -1901,20 +1901,58 @@ const AdminDashboard = ({ profile }: { profile: UserProfile | null }) => {
       }
 
       // 1. Fetch user document to verify existence
-      const userRef = doc(db, 'users', dep.userId);
-      const userSnap = await getDoc(userRef);
+      let userRef = doc(db, 'users', dep.userId);
+      let userSnap = await getDoc(userRef);
+      let resolvedUserId = dep.userId;
 
       if (!userSnap.exists()) {
-        setAdminStatus({ type: 'error', message: 'User document not found. Cannot credit balance.' });
-        return;
+        console.log(`[Admin] User doc not found by ID: ${dep.userId}. Checking fallbacks...`);
+        const emailToSearch = dep.userEmail || (dep.userId.includes('@') ? dep.userId : null);
+        if (emailToSearch) {
+          const q = query(collection(db, 'users'), where('email', '==', emailToSearch.toLowerCase()));
+          const querySnap = await getDocs(q);
+          if (!querySnap.empty) {
+            userRef = querySnap.docs[0].ref;
+            userSnap = querySnap.docs[0];
+            resolvedUserId = userRef.id;
+            console.log(`[Admin] Resolved user doc by email fallback. New UID: ${resolvedUserId}`);
+          }
+        }
+      }
+
+      let isNewProfileCreated = false;
+      let newProfileData: UserProfile | null = null;
+      let myReferralCode = '';
+
+      if (!userSnap.exists()) {
+        console.log(`[Admin] User document not found for resolved UID: ${resolvedUserId}. Auto-generating profile...`);
+        myReferralCode = await generateReferralCode();
+        newProfileData = {
+          uid: resolvedUserId,
+          email: dep.userEmail?.toLowerCase() || `${resolvedUserId.slice(0, 8)}@pixistaking.com`,
+          balance: amountToCredit,
+          totalCommissionsEarned: 0,
+          referralCode: myReferralCode,
+          referredBy: null,
+          role: 'user',
+          status: 'active',
+          knownDevices: [],
+          createdAt: serverTimestamp()
+        };
+        isNewProfileCreated = true;
       }
 
       const batch = writeBatch(db);
       
-      // Update user balance
-      batch.update(userRef, { 
-        balance: increment(amountToCredit) 
-      });
+      if (isNewProfileCreated && newProfileData) {
+        batch.set(userRef, newProfileData);
+        batch.set(doc(db, 'referralCodes', myReferralCode), { uid: resolvedUserId });
+      } else {
+        // Update user balance
+        batch.update(userRef, { 
+          balance: increment(amountToCredit) 
+        });
+      }
 
       // Update deposit status
       const depRef = doc(db, 'deposits', dep.id);
@@ -1926,14 +1964,19 @@ const AdminDashboard = ({ profile }: { profile: UserProfile | null }) => {
       // Send notification to user
       const notifRef = doc(collection(db, 'notifications'));
       batch.set(notifRef, {
-        userId: dep.userId,
+        userId: resolvedUserId,
         title: 'Deposit Approved ✅',
         message: `Your deposit of ${amountToCredit} USDT has been approved and credited to your balance.`,
         createdAt: serverTimestamp()
       });
 
       await batch.commit();
-      setAdminStatus({ type: 'success', message: 'Deposit approved and balance updated' });
+      setAdminStatus({ 
+        type: 'success', 
+        message: isNewProfileCreated 
+          ? 'Profile auto-created, deposit approved and credited!' 
+          : 'Deposit approved and balance updated' 
+      });
     } catch (err: any) { 
       console.error("Approve Deposit Error:", err);
       const errorMessage = err.message || 'Failed to approve deposit';
@@ -1948,6 +1991,20 @@ const AdminDashboard = ({ profile }: { profile: UserProfile | null }) => {
       return;
     }
     try {
+      let resolvedUserId = dep.userId;
+      const userRef = doc(db, 'users', dep.userId);
+      const userSnap = await getDoc(userRef);
+      if (!userSnap.exists()) {
+        const emailToSearch = dep.userEmail || (dep.userId.includes('@') ? dep.userId : null);
+        if (emailToSearch) {
+          const q = query(collection(db, 'users'), where('email', '==', emailToSearch.toLowerCase()));
+          const querySnap = await getDocs(q);
+          if (!querySnap.empty) {
+            resolvedUserId = querySnap.docs[0].id;
+          }
+        }
+      }
+
       const batch = writeBatch(db);
       batch.update(doc(db, 'deposits', dep.id), { 
         status: 'rejected',
@@ -1957,7 +2014,7 @@ const AdminDashboard = ({ profile }: { profile: UserProfile | null }) => {
       // Send notification to user
       const notifRef = doc(collection(db, 'notifications'));
       batch.set(notifRef, {
-        userId: dep.userId,
+        userId: resolvedUserId,
         title: 'Deposit Rejected ❌',
         message: `Your deposit of ${dep.amount} USDT was rejected. Please contact support or check your transaction details.`,
         createdAt: serverTimestamp()
@@ -1977,6 +2034,20 @@ const AdminDashboard = ({ profile }: { profile: UserProfile | null }) => {
       return;
     }
     try {
+      let resolvedUserId = withd.userId;
+      const userRef = doc(db, 'users', withd.userId);
+      const userSnap = await getDoc(userRef);
+      if (!userSnap.exists()) {
+        const emailToSearch = withd.userEmail || (withd.userId.includes('@') ? withd.userId : null);
+        if (emailToSearch) {
+          const q = query(collection(db, 'users'), where('email', '==', emailToSearch.toLowerCase()));
+          const querySnap = await getDocs(q);
+          if (!querySnap.empty) {
+            resolvedUserId = querySnap.docs[0].id;
+          }
+        }
+      }
+
       const batch = writeBatch(db);
       batch.update(doc(db, 'withdrawals', withd.id), { 
         status: 'approved',
@@ -1986,7 +2057,7 @@ const AdminDashboard = ({ profile }: { profile: UserProfile | null }) => {
       // Send notification to user
       const notifRef = doc(collection(db, 'notifications'));
       batch.set(notifRef, {
-        userId: withd.userId,
+        userId: resolvedUserId,
         title: 'Withdrawal Approved ✅',
         message: `Your withdrawal of ${withd.amount} USDT has been approved and processed.`,
         createdAt: serverTimestamp()
@@ -2006,9 +2077,33 @@ const AdminDashboard = ({ profile }: { profile: UserProfile | null }) => {
       return;
     }
     try {
+      let userRef = doc(db, 'users', withd.userId);
+      let userSnap = await getDoc(userRef);
+      let resolvedUserId = withd.userId;
+
+      if (!userSnap.exists()) {
+        console.log(`[Admin] User doc not found by ID: ${withd.userId} for withdrawal refund. Checking fallbacks...`);
+        const emailToSearch = withd.userEmail || (withd.userId.includes('@') ? withd.userId : null);
+        if (emailToSearch) {
+          const q = query(collection(db, 'users'), where('email', '==', emailToSearch.toLowerCase()));
+          const querySnap = await getDocs(q);
+          if (!querySnap.empty) {
+            userRef = querySnap.docs[0].ref;
+            userSnap = querySnap.docs[0];
+            resolvedUserId = userRef.id;
+            console.log(`[Admin] Resolved user doc for withdrawal refund via email: ${resolvedUserId}`);
+          }
+        }
+      }
+
+      if (!userSnap.exists()) {
+        setAdminStatus({ type: 'error', message: 'User document not found. Cannot refund balance.' });
+        return;
+      }
+
       const batch = writeBatch(db);
       const refundAmount = Number(withd.amount);
-      batch.update(doc(db, 'users', withd.userId), { 
+      batch.update(userRef, { 
         balance: increment(refundAmount) 
       });
       batch.update(doc(db, 'withdrawals', withd.id), { 
@@ -2019,7 +2114,7 @@ const AdminDashboard = ({ profile }: { profile: UserProfile | null }) => {
       // Send notification to user
       const notifRef = doc(collection(db, 'notifications'));
       batch.set(notifRef, {
-        userId: withd.userId,
+        userId: resolvedUserId,
         title: 'Withdrawal Rejected ❌',
         message: `Your withdrawal of ${withd.amount} USDT was rejected and funds were refunded to your balance.`,
         createdAt: serverTimestamp()
@@ -3368,6 +3463,27 @@ function AppContent() {
             referralCode: myReferralCode,
             referredBy: null,
             role: 'admin',
+            status: 'active',
+            knownDevices: [getDeviceId()],
+            createdAt: serverTimestamp()
+          };
+          const batch = writeBatch(db);
+          batch.set(userRef, profileData);
+          batch.set(doc(db, 'referralCodes', myReferralCode), { uid: user.uid });
+          batch.commit().catch(console.error);
+          setProfile(profileData);
+        });
+      } else {
+        // Create missing regular user profile
+        generateReferralCode().then(myReferralCode => {
+          const profileData: UserProfile = {
+            uid: user.uid,
+            email: user.email || `${user.uid.slice(0, 8)}@pixistaking.com`,
+            balance: 0,
+            totalCommissionsEarned: 0,
+            referralCode: myReferralCode,
+            referredBy: null,
+            role: 'user',
             status: 'active',
             knownDevices: [getDeviceId()],
             createdAt: serverTimestamp()

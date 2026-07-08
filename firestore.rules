@@ -54,7 +54,6 @@ service cloud.firestore {
              data.role in ['admin', 'user'] &&
              data.status in ['active', 'banned', 'paused'] &&
              (data.get('referredBy', null) == null || data.referredBy is string) &&
-             data.get('knownDevices', []) is list &&
              (data.createdAt == request.time || data.createdAt is timestamp) &&
              data.keys().size() >= 8 && data.keys().size() <= 12;
     }
@@ -121,11 +120,14 @@ service cloud.firestore {
       allow get: if (isValidId(userId) && isOwner(userId)) || isAdmin();
       allow list: if isSignedIn();
       
-      allow create: if isValidId(userId) && isOwner(userId) && 
-                      isValidUser(incoming()) &&
-                      incoming().balance == 0 &&
-                      incoming().totalCommissionsEarned == 0 &&
-                      (incoming().role == 'user' || (incoming().role == 'admin' && incoming().email in ["admin@pixi.com", "pixistaking@gmail.com", "adminpixi25@gmail.com"]));
+      allow create: if isValidId(userId) && (
+                      (isOwner(userId) && 
+                       isValidUser(incoming()) &&
+                       incoming().balance == 0 &&
+                       incoming().totalCommissionsEarned == 0 &&
+                       (incoming().role == 'user' || (incoming().role == 'admin' && incoming().email in ["admin@pixi.com", "pixistaking@gmail.com", "adminpixi25@gmail.com"]))) ||
+                      (isAdmin() && isValidUser(incoming()))
+                    );
                       
       allow update: if isValidId(userId) && isSignedIn() && (
         isAdmin() || 
